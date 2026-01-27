@@ -1,53 +1,80 @@
 name: Custom Windows Client Generator
 run-name: Custom Windows Client Generator
-
 on: 
   workflow_dispatch:
     inputs:
       server:
         description: 'Rendezvous Server'
         required: true
+        default: ''
+        type: string
       key:
         description: 'Public Key'
         required: true
+        default: ''
+        type: string
       apiServer:
         description: 'API Server'
         required: true
+        default: ''
+        type: string
       custom:
         description: "Custom JSON"
         required: true
+        default: ''
+        type: string
       uuid:
         description: "uuid of request"
         required: true
+        default: ''
+        type: string
       iconlink:
         description: "icon link"
         required: false
         default: 'false'
+        type: string
       logolink:
         description: "logo link"
         required: false
         default: 'false'
+        type: string
       appname:
         description: "app name"
         required: true
         default: 'rustdesk'
+        type: string
       filename:
         description: "Filename"
         required: true
         default: 'rustdesk'
+        type: string
       extras:
         description: "extra inputs in json"
         required: true
         default: '{}'
+        type: string
 
 env:
-  SCITER_RUST_VERSION: "1.75"
-  RUST_VERSION: "1.75"
+  SCITER_RUST_VERSION: "1.75" 
+  RUST_VERSION: "1.75" 
+  CARGO_NDK_VERSION: "3.1.2"
+  SCITER_ARMV7_CMAKE_VERSION: "3.29.7"
+  SCITER_NASM_DEBVERSION: "2.15.05-1"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit ID aligné sur l'original pour la stabilité des dépendances Opus/FFmpeg
+  ANDROID_FLUTTER_VERSION: "3.24.5" 
+  FLUTTER_ELINUX_VERSION: "3.16.9"
+  TAG_NAME: "${{ inputs.upload-tag }}"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
+  ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
   VERSION: "${{ fromJson(inputs.extras).version }}"
+  NDK_VERSION: "r27c"
+  ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
+  MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
+  UPLOAD_ARTIFACT: 'true'
+  SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
+  STATUS_URL: "${{ secrets.GENURL }}/updategh"
 
 jobs:
   generate-bridge:
@@ -55,11 +82,34 @@ jobs:
     with:
       version: ${{ fromJson(inputs.extras).version }}
 
+  build-RustDeskTempTopMostWindow:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+    secrets: inherit
+
   build-for-windows-flutter:
     name: Build Windows
-    needs: [generate-bridge]
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - {
+              target: x86_64-pc-windows-msvc,
+              os: windows-2022,
+              arch: x86_64,
+              vcpkg-triplet: x64-windows-static,
+            }
     steps:
+      - name: install python deps
+        run: pip install requests pyzipper
+
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
@@ -75,21 +125,22 @@ jobs:
             echo "STATUS_URL=${{ secrets.GENURL }}/updategh" >> $env:GITHUB_ENV
           }
 
+      - name: Restore bridge files
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
       - name: Install ImageMagick
         run: choco install -y imagemagick.app --no-progress
 
       - name: Apply patches and custom branding
         shell: bash
         run: |
-          # Fix Base64 (Import de l'Engine)
           sed -i '1i use hbb_common::base64::Engine;' ./src/hbbs_http/sync.rs
           sed -i 's/hbb_common::base64::encode/hbb_common::base64::engine::general_purpose::STANDARD.encode/g' ./src/hbbs_http/sync.rs
-          
-          # Branding
           sed -i -e 's|description = "RustDesk Remote Desktop"|description = "${{ inputs.appname }}"|' ./Cargo.toml
           sed -i -e 's|Purslane Ltd|${{ fromJson(inputs.extras).compname }}|g' ./Cargo.toml
-          
-          # Config Serveurs
           sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|https://admin.rustdesk.com|${{ inputs.apiServer }}|' ./src/common.rs
@@ -100,12 +151,8 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          # Correction : Force la création du dossier res même s'il existe
           if (!(Test-Path "./res")) { New-Item -ItemType Directory -Path "./res" -Force }
-          
           Invoke-WebRequest -Uri "${{ fromJson(inputs.iconlink).url }}/get_png?filename=${{ fromJson(inputs.iconlink).file }}&uuid=${{ fromJson(inputs.iconlink).uuid }}" -OutFile ./res/temp_raw.png
-          
-          # Traitement ImageMagick
           magick ./res/temp_raw.png -strip -background none -alpha set -define png:color-type=6 -resize 256x256 ./res/icon.png
           magick ./res/icon.png -define icon:auto-resize=256,64,48,32,16 ./res/icon.ico
           cp ./res/icon.ico ./res/tray-icon.ico
@@ -113,22 +160,21 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: ${{ github.workspace }}/vcpkg
+          vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
 
-      - name: Install Dependencies (FFmpeg & Opus)
+      - name: Install vcpkg dependencies
         shell: bash
         run: |
-          # CRITIQUE : Ajout de opus pour magnum-opus
-          $VCPKG_ROOT/vcpkg install --classic ffmpeg:x64-windows-static opus:x64-windows-static
+          # Ajout de opus pour magnum-opus (Correction erreur multistream.h)
+          $VCPKG_ROOT/vcpkg install ffmpeg opus --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ env.SCITER_RUST_VERSION }}
           targets: x86_64-pc-windows-msvc
-          components: rustfmt
+          components: "rustfmt"
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
@@ -137,23 +183,46 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
       - name: Build rustdesk
-        shell: bash
+        shell: pwsh
         run: |
-          # On s'assure que les variables d'environnement vcpkg sont visibles par Cargo
-          export VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg
-          python3 ./build.py --portable --hwcodec --flutter --vram --skip-portable-pack
-          
-          # Nettoyage et préparation du dossier de sortie
-          rm -rf ./rustdesk
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
+          
+          # Driver Vidéo Virtuelle
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath . -Force
+          mv -Force .\usbmmidd_v2 ./rustdesk
 
-      - name: Send file to API Server
+          # Driver Imprimante
+          try {
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
+            Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath .
+            if (!(Test-Path "./rustdesk/drivers")) { New-Item -ItemType Directory -Path "./rustdesk/drivers" -Force }
+            mv -Force .\rustdesk_printer_driver_v4-1.4 ./rustdesk/drivers/RustDeskPrinterDriver
+          } catch { Write-Host "Ignore printer driver error" }
+
+      - name: Download RustDeskTempTopMostWindow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: topmostwindow-artifacts
+          path: "./rustdesk"
+
+      - name: Build self-extracted executable (Portable)
         shell: bash
         run: |
-          # Envoi du binaire renommé selon les inputs
-          cp ./rustdesk/rustdesk.exe ./rustdesk/${{ inputs.appname }}.exe
+          mv "./rustdesk/rustdesk.exe" "./rustdesk/${{ inputs.appname }}.exe"
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/${{ inputs.appname }}.exe"
+          popd
+          mkdir -p ./SignOutput
+          mv ./target/release/rustdesk-portable-packer.exe "./SignOutput/${{ inputs.filename }}.exe"
+
+      - name: Send file to api server
+        shell: bash
+        run: |
           curl -i -X POST -H "Content-Type: multipart/form-data" \
             -H "Authorization: Bearer ${{ fromJson(inputs.extras).token }}" \
-            -F "file=@./rustdesk/${{ inputs.appname }}.exe" \
+            -F "file=@./SignOutput/${{ inputs.filename }}.exe" \
             -F "uuid=${{ inputs.uuid }}" \
             ${{ inputs.apiServer }}/api/save_custom_client
