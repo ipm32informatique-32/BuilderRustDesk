@@ -1,64 +1,51 @@
 name: Custom Windows Client Generator
 run-name: Custom Windows Client Generator
+
 on: 
   workflow_dispatch:
     inputs:
       server:
         description: 'Rendezvous Server'
         required: true
-        default: ''
-        type: string
       key:
         description: 'Public Key'
         required: true
-        default: ''
-        type: string
       apiServer:
         description: 'API Server'
         required: true
-        default: ''
-        type: string
       custom:
         description: "Custom JSON"
         required: true
-        default: ''
-        type: string
       uuid:
         description: "uuid of request"
         required: true
-        default: ''
-        type: string
       iconlink:
         description: "icon link"
         required: false
         default: 'false'
-        type: string
       logolink:
         description: "logo link"
         required: false
         default: 'false'
-        type: string
       appname:
         description: "app name"
         required: true
         default: 'rustdesk'
-        type: string
       filename:
         description: "Filename"
         required: true
         default: 'rustdesk'
-        type: string
       extras:
         description: "extra inputs in json"
         required: true
         default: '{}'
-        type: string
 
 env:
   SCITER_RUST_VERSION: "1.75"
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
+  # Commit ID aligné sur l'original pour la stabilité des dépendances Opus/FFmpeg
   VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
   VERSION: "${{ fromJson(inputs.extras).version }}"
 
@@ -91,7 +78,6 @@ jobs:
       - name: Install ImageMagick
         run: choco install -y imagemagick.app --no-progress
 
-      # --- PERSONNALISATION & CORRECTIFS CODE ---
       - name: Apply patches and custom branding
         shell: bash
         run: |
@@ -99,39 +85,43 @@ jobs:
           sed -i '1i use hbb_common::base64::Engine;' ./src/hbbs_http/sync.rs
           sed -i 's/hbb_common::base64::encode/hbb_common::base64::engine::general_purpose::STANDARD.encode/g' ./src/hbbs_http/sync.rs
           
-          # Branding (App Name & Company)
+          # Branding
           sed -i -e 's|description = "RustDesk Remote Desktop"|description = "${{ inputs.appname }}"|' ./Cargo.toml
           sed -i -e 's|Purslane Ltd|${{ fromJson(inputs.extras).compname }}|g' ./Cargo.toml
           
-          # Serveurs & Liens
+          # Config Serveurs
           sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|https://admin.rustdesk.com|${{ inputs.apiServer }}|' ./src/common.rs
           sed -i -e 's|https://rustdesk.com|${{ fromJson(inputs.extras).urlLink }}|g' ./build.py
 
-      # --- TRAITEMENT DU LOGO CLOUD GASCON ---
       - name: Process logo and icons
         if: ${{ inputs.iconlink != 'false' }}
         continue-on-error: true
+        shell: pwsh
         run: |
-          mkdir -p ./res
-          Invoke-WebRequest -Uri ${{ fromJson(inputs.iconlink).url }}/get_png?filename=${{ fromJson(inputs.iconlink).file }}"&"uuid=${{ fromJson(inputs.iconlink).uuid }} -OutFile ./res/temp_raw.png
-          # Nettoyage -strip pour éviter l'erreur NoDecoder de Flutter
+          # Correction : Force la création du dossier res même s'il existe
+          if (!(Test-Path "./res")) { New-Item -ItemType Directory -Path "./res" -Force }
+          
+          Invoke-WebRequest -Uri "${{ fromJson(inputs.iconlink).url }}/get_png?filename=${{ fromJson(inputs.iconlink).file }}&uuid=${{ fromJson(inputs.iconlink).uuid }}" -OutFile ./res/temp_raw.png
+          
+          # Traitement ImageMagick
           magick ./res/temp_raw.png -strip -background none -alpha set -define png:color-type=6 -resize 256x256 ./res/icon.png
           magick ./res/icon.png -define icon:auto-resize=256,64,48,32,16 ./res/icon.ico
           cp ./res/icon.ico ./res/tray-icon.ico
 
-      # --- INSTALLATION DÉPENDANCES (FFMPEG / HWCODEC) ---
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
+          vcpkgDirectory: ${{ github.workspace }}/vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
-      - name: Install FFmpeg (Classic Mode)
+      - name: Install Dependencies (FFmpeg & Opus)
         shell: bash
         run: |
-          # On force le classic mode pour installer ffmpeg sans erreur de manifest
-          $VCPKG_ROOT/vcpkg install --classic ffmpeg:x64-windows-static
+          # CRITIQUE : Ajout de opus pour magnum-opus
+          $VCPKG_ROOT/vcpkg install --classic ffmpeg:x64-windows-static opus:x64-windows-static
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
@@ -146,18 +136,22 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- COMPILATION FINALE ---
       - name: Build rustdesk
         shell: bash
         run: |
-          # Utilisation de / pour éviter les erreurs d'échappement de chemin en Bash
+          # On s'assure que les variables d'environnement vcpkg sont visibles par Cargo
+          export VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg
           python3 ./build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          
+          # Nettoyage et préparation du dossier de sortie
+          rm -rf ./rustdesk
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
 
-      # --- TRANSMISSION DU FICHIER ---
-      - name: send file to api server
+      - name: Send file to API Server
         shell: bash
         run: |
+          # Envoi du binaire renommé selon les inputs
+          cp ./rustdesk/rustdesk.exe ./rustdesk/${{ inputs.appname }}.exe
           curl -i -X POST -H "Content-Type: multipart/form-data" \
             -H "Authorization: Bearer ${{ fromJson(inputs.extras).token }}" \
             -F "file=@./rustdesk/${{ inputs.appname }}.exe" \
