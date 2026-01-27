@@ -150,17 +150,17 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
-      # --- INSTALLATION DEPENDANCES (FIX ULTIME POWERSHELL) ---
+      # --- INSTALLATION DEPENDANCES (CORRECTIF FINAL) ---
       - name: Install Dependencies
         shell: pwsh
         run: |
-          # 1. Suppression brutale de vcpkg.json via PowerShell (plus fiable que bash sur windows)
+          # 1. Suppression de vcpkg.json pour passer en mode classique par défaut
           Write-Host "Recherche et suppression de vcpkg.json..."
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # 2. Installation
-          # On utilise & pour lancer l'executable vcpkg proprement
-          & "$env:VCPKG_ROOT\vcpkg" install --classic ffmpeg opus libvpx libyuv aom libmfx protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          # 2. Installation SANS le flag --classic (cette version de 2023 ne le connait pas)
+          # libmfx sera trouvé car le commit ID pointe vers avril 2023
+          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom libmfx protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
