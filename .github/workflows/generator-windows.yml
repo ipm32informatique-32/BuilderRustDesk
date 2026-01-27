@@ -70,7 +70,7 @@ jobs:
     with:
       version: ${{ fromJson(inputs.extras).version }}
 
-  # JOB RÉINTÉGRÉ POUR ÉVITER L'ERREUR DE GRAPHE
+  # JOB REQUIS POUR LE GRAPHE ET LES ARTIFACTS
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
     with:
@@ -86,6 +86,9 @@ jobs:
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
     steps:
+      - name: install python deps
+        run: pip install requests pyzipper
+
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
@@ -101,9 +104,12 @@ jobs:
             echo "STATUS_URL=${{ secrets.GENURL }}/updategh" >> $env:GITHUB_ENV
           }
 
-      # Installation de Nasm/Yasm pour compiler VP8/FFmpeg
-      - name: Install Build Tools
-        run: choco install -y nasm yasm ninja imagemagick.app --no-progress
+      # --- FIX CRITIQUE 1 : OUTILS DE BUILD ---
+      - name: Install Build Tools (Nasm, Yasm, Ninja)
+        run: |
+          choco install -y nasm yasm ninja imagemagick.app --no-progress
+          # On s'assure qu'ils sont dans le PATH
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
       # --- PERSONNALISATION & CORRECTIFS CODE ---
       - name: Apply patches and custom branding
@@ -146,16 +152,15 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
-      - name: Install FFmpeg Opus VP8 (Classic Mode)
+      - name: Install FFmpeg Opus VP8 (Classic Mode Fix)
         shell: bash
         run: |
-          # FIX CRITIQUE: On renomme vcpkg.json pour désactiver le mode manifeste
-          if [ -f "vcpkg.json" ]; then
-            echo "Renaming vcpkg.json to bypass manifest mode..."
-            mv vcpkg.json vcpkg.json.bak
-          fi
+          # --- FIX ULTIME POUR L'ERREUR DE MANIFESTE ---
+          # On cherche et renomme vcpkg.json pour forcer le mode classique
+          find . -name "vcpkg.json" -type f -exec mv {} {}.bak \;
           
-          # FIX: Installation explicite de OPUS et LIBVPX (VP8) avec le flag --classic
+          # Installation explicite de TOUTES les libs audio/vidéo requises
+          # y compris OPUS (pour le son) et LIBVPX (pour la vidéo VP8/VP9)
           $VCPKG_ROOT/vcpkg install --classic ffmpeg opus libvpx libyuv aom libmfx protobuf x264 --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Install Rust
