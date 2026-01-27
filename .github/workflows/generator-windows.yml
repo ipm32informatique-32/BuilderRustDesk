@@ -59,8 +59,8 @@ env:
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit d'Avril 2023 (Stable pour RustDesk)
-  VCPKG_COMMIT_ID: "501db0f17ef6df184fcdbfbe0f87cde2313b6ab1"
+  # RETOUR A UNE VERSION RECENTE (Jan 2025) pour avoir des liens valides
+  VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
 
@@ -150,7 +150,7 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
-      # --- INSTALLATION DEPENDANCES (LIBMFX RETIRÉ) ---
+      # --- INSTALLATION DEPENDANCES (FIX LIENS & LIBMFX) ---
       - name: Install Dependencies
         shell: pwsh
         run: |
@@ -158,8 +158,9 @@ jobs:
           Write-Host "Recherche et suppression de vcpkg.json..."
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # 2. Installation SANS libmfx qui causait l'erreur
-          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          # 2. Installation SANS libmfx (introuvable) et AVEC flag classic (supporté par vcpkg récent)
+          # On utilise vcpkg récent, donc les téléchargements MSYS2 fonctionneront.
+          & "$env:VCPKG_ROOT\vcpkg" install --classic ffmpeg opus libvpx libyuv aom protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
