@@ -59,7 +59,7 @@ env:
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # FIX CRITIQUE: Utilisation d'une version de vcpkg qui contient encore libmfx (Avril 2023)
+  # Commit d'Avril 2023 (Contient libmfx et compatible avec le code actuel)
   VCPKG_COMMIT_ID: "501db0f17ef6df184fcdbfbe0f87cde2313b6ab1"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -70,7 +70,6 @@ jobs:
     with:
       version: ${{ fromJson(inputs.extras).version }}
 
-  # Job indispensable pour avoir l'artifact 'topmostwindow'
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
     with:
@@ -109,13 +108,12 @@ jobs:
             echo "STATUS_URL=${{ secrets.GENURL }}/updategh" >> $env:GITHUB_ENV
           }
 
-      # Installation de Nasm/Yasm/Ninja via Choco (Requis pour compiler ffmpeg/vpx)
       - name: Install Build Tools
         run: |
           choco install -y nasm yasm ninja imagemagick.app --no-progress
           echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
-      # --- PERSONNALISATION & BRANDING ---
+      # --- PERSONNALISATION ---
       - name: Apply patches and custom branding
         shell: bash
         run: |
@@ -127,44 +125,42 @@ jobs:
           sed -i -e 's|description = "RustDesk Remote Desktop"|description = "${{ inputs.appname }}"|' ./Cargo.toml
           sed -i -e 's|Purslane Ltd|${{ fromJson(inputs.extras).compname }}|g' ./Cargo.toml
           
-          # Config Serveurs
+          # Config
           sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|https://admin.rustdesk.com|${{ inputs.apiServer }}|' ./src/common.rs
           sed -i -e 's|https://rustdesk.com|${{ fromJson(inputs.extras).urlLink }}|g' ./build.py
 
-      # --- TRAITEMENT DU LOGO ---
       - name: Process logo and icons
         if: ${{ inputs.iconlink != 'false' }}
         continue-on-error: true
         shell: pwsh
         run: |
-          # Force la création du dossier res
           if (!(Test-Path "./res")) { New-Item -ItemType Directory -Path "./res" -Force }
-          
-          # Téléchargement sécurisé
           Invoke-WebRequest -Uri "${{ fromJson(inputs.iconlink).url }}/get_png?filename=${{ fromJson(inputs.iconlink).file }}&uuid=${{ fromJson(inputs.iconlink).uuid }}" -OutFile ./res/temp_raw.png
           
           magick ./res/temp_raw.png -strip -background none -alpha set -define png:color-type=6 -resize 256x256 ./res/icon.png
           magick ./res/icon.png -define icon:auto-resize=256,64,48,32,16 ./res/icon.ico
           cp ./res/icon.ico ./res/tray-icon.ico
 
-      # --- INSTALLATION DÉPENDANCES (FIX MAJEUR) ---
+      # --- VCPKG SETUP ---
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
-      - name: Install Dependencies (Classic Mode)
-        shell: bash
+      # --- INSTALLATION DEPENDANCES (FIX ULTIME POWERSHELL) ---
+      - name: Install Dependencies
+        shell: pwsh
         run: |
-          # 1. Suppression brutale de tout fichier vcpkg.json pour désactiver le mode manifeste
-          find . -name "vcpkg.json" -type f -exec rm -f {} \;
+          # 1. Suppression brutale de vcpkg.json via PowerShell (plus fiable que bash sur windows)
+          Write-Host "Recherche et suppression de vcpkg.json..."
+          Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # 2. Installation manuelle avec --classic
-          # libmfx sera trouvé car on utilise un vieux commit ID de vcpkg (2023)
-          $VCPKG_ROOT/vcpkg install --classic ffmpeg opus libvpx libyuv aom libmfx protobuf x264 --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+          # 2. Installation
+          # On utilise & pour lancer l'executable vcpkg proprement
+          & "$env:VCPKG_ROOT\vcpkg" install --classic ffmpeg opus libvpx libyuv aom libmfx protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
@@ -179,7 +175,7 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- COMPILATION FINALE ---
+      # --- COMPILATION ---
       - name: Build rustdesk
         shell: pwsh
         run: |
@@ -188,13 +184,11 @@ jobs:
           if (Test-Path "./rustdesk") { Remove-Item -Recurse -Force "./rustdesk" }
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
 
-          # Driver Vidéo Virtuelle
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath . -Force
           Remove-Item -Path usbmmidd_v2\Win32, usbmmidd_v2\deviceinstaller64.exe, usbmmidd_v2\deviceinstaller.exe, usbmmidd_v2\usbmmidd.bat -Recurse -ErrorAction SilentlyContinue
           mv -Force .\usbmmidd_v2 ./rustdesk
 
-          # Driver Imprimante
           try {
             Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
             Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
@@ -230,7 +224,6 @@ jobs:
             cp $runner_res ./libs/portable/Runner.res;
           fi
 
-      # Récupération de l'artifact manquant
       - name: Download RustDeskTempTopMostWindow artifacts
         uses: actions/download-artifact@v4
         if: env.UPLOAD_ARTIFACT == 'true'
@@ -247,7 +240,7 @@ jobs:
           customHeaders: '{"Content-Type": "application/json"}'
           data: '{"uuid": "${{ inputs.uuid }}", "status": "70% complete (Packing)"}'
 
-      # --- PACKAGING & SIGNATURE ---
+      # --- PACKAGING ---
       - name: zip dlls
         continue-on-error: true
         shell: pwsh
@@ -345,7 +338,6 @@ jobs:
         run: |
           mv ./SignOutput/rustdesk.msi "./SignOutput/${{ inputs.filename }}.msi" || echo "rustdesk"
 
-      # --- ENVOI AU SERVEUR ---
       - name: send file to api server
         shell: bash
         run: |
