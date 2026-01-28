@@ -45,9 +45,9 @@ env:
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit du 21 Juin 2023 : Le dernier rempart où libmfx existe.
+  # Commit ID du 21 Juin 2023 (utilisé pour nommer le dossier extrait)
   VCPKG_COMMIT_ID: "1a17953258f4c51b22e1b65d66649f80a4913702"
-  # Dossier personnalisé pour éviter tout conflit avec les actions par défaut
+  # On force le chemin vers C:\vcpkg_custom
   VCPKG_ROOT: "C:\\vcpkg_custom"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -90,24 +90,28 @@ jobs:
         run: choco install -y nasm yasm ninja imagemagick.app --no-progress
 
       # ------------------------------------------------------------------------
-      # LA SOLUTION MANUELLE ET ROBUSTE
-      # On ne dépend plus d'une action externe. On fait le travail nous-mêmes.
+      # METHODE "PARACHUTE" : TELECHARGEMENT DIRECT DU ZIP
+      # On contourne totalement les erreurs Git.
       # ------------------------------------------------------------------------
-      - name: Setup Custom vcpkg (MANUAL FORCE)
+      - name: Setup Custom vcpkg (Archive Download)
         shell: pwsh
         run: |
-          Write-Host ">>> CLONAGE DE VCPKG..."
-          # Clone complet pour être sûr d'avoir l'historique
-          git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          Write-Host ">>> TÉLÉCHARGEMENT DE L'ARCHIVE VCPKG (Juin 2023)..."
+          $url = "https://github.com/microsoft/vcpkg/archive/${{ env.VCPKG_COMMIT_ID }}.zip"
+          $output = "vcpkg_archive.zip"
           
-          Write-Host ">>> DEPLACEMENT DANS LE DOSSIER..."
+          # Téléchargement
+          Invoke-WebRequest -Uri $url -OutFile $output
+          
+          Write-Host ">>> EXTRACTION DE L'ARCHIVE..."
+          Expand-Archive -Path $output -DestinationPath "C:\"
+          
+          # Renommage du dossier extrait (qui contient le hash) vers C:\vcpkg_custom
+          Move-Item "C:\vcpkg-${{ env.VCPKG_COMMIT_ID }}" $env:VCPKG_ROOT
+          
+          Write-Host ">>> COMPILATION DE VCPKG..."
           Set-Location $env:VCPKG_ROOT
-          
-          Write-Host ">>> RETOUR DANS LE TEMPS (Commit 2023)..."
-          git checkout $env:VCPKG_COMMIT_ID
-          
-          Write-Host ">>> COMPILATION DE L'OUTIL VCPKG..."
-          .\bootstrap-vcpkg.bat
+          .\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Install Dependencies
         shell: pwsh
@@ -115,8 +119,8 @@ jobs:
           # Nettoyage de sécurité
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force
           
-          Write-Host ">>> INSTALLATION DES LIBRAIRIES (dont libmfx)..."
-          # On appelle explicitement l'exécutable qu'on vient de compiler
+          Write-Host ">>> INSTALLATION DES LIBRAIRIES (Commit 2023 garanti)..."
+          # Comme on a dézippé le code de 2023, libmfx est OBLIGATOIREMENT dedans.
           & "$env:VCPKG_ROOT\vcpkg.exe" install ffmpeg opus libvpx libyuv aom protobuf x264 libmfx --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust and Flutter
@@ -133,18 +137,17 @@ jobs:
 
       - name: Build rustdesk
         shell: pwsh
-        # On force le chemin vers NOTRE dossier vcpkg custom
+        # Configuration des chemins vers notre dossier custom
         env:
           VCPKG_ROOT: "C:\\vcpkg_custom"
           RUSTFLAGS: "-C target-feature=+crt-static -L native=C:/vcpkg_custom/installed/x64-windows-static/lib"
         run: |
-          Write-Host ">>> LANCEMENT DU BUILD AVEC VRAM..."
+          Write-Host ">>> BUILD DE RUSTDESK AVEC ACCELERATION MATERIELLE..."
           python3 .\build.py --portable --flutter --vram --skip-portable-pack
           
-          # Vérification immédiate du succès
           if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) { 
-            Write-Error "CRITICAL: rustdesk.exe introuvable après compilation."
-            exit 1 
+             Write-Error "CRITICAL: Echec de la compilation, exécutable non trouvé."
+             exit 1 
           }
 
           if (Test-Path "./rustdesk") { Remove-Item -Recurse -Force "./rustdesk" }
