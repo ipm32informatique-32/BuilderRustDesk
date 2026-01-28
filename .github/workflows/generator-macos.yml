@@ -52,7 +52,7 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   STATUS_URL: ${{ inputs.apiServer }}/api/updategh
-  # On force une version récente pour supporter les puces M1/M2 correctement
+  # On définit la cible de déploiement globalement
   MACOSX_DEPLOYMENT_TARGET: "12.3"
 
 jobs:
@@ -122,16 +122,24 @@ jobs:
       - name: Install dependencies (Brew)
         run: |
           brew update
-          # AJOUT IMPORTANT: ffmpeg est requis pour --hwcodec
-          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg libsodium
+          # Installation des outils et de ffmpeg requis pour hwcodec
+          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg libsodium pkg-config
           
-          # Configuration des chemins pour que le compilateur trouve FFmpeg et LLVM dans /opt/homebrew
+          # Configuration agressive des chemins pour que le compilateur (clang/cc) trouve les includes Homebrew
           echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> $GITHUB_ENV
           echo 'export PKG_CONFIG_PATH="/opt/homebrew/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"' >> $GITHUB_ENV
+          
+          # Flags pour le compilateur C/C++ (Indispensable pour l'erreur libavutil/attributes.h)
+          echo "CFLAGS=-I/opt/homebrew/include -I/opt/homebrew/opt/ffmpeg/include" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I/opt/homebrew/include -I/opt/homebrew/opt/ffmpeg/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L/opt/homebrew/lib -L/opt/homebrew/opt/ffmpeg/lib" >> $GITHUB_ENV
+          
+          # Flags pour Bindgen (utilisé par les crates Rust qui parlent au C)
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I/opt/homebrew/include -I/opt/homebrew/opt/ffmpeg/include" >> $GITHUB_ENV
+          
+          # Variables de repli
           echo 'export CPATH="/opt/homebrew/include:$CPATH"' >> $GITHUB_ENV
           echo 'export LIBRARY_PATH="/opt/homebrew/lib:$LIBRARY_PATH"' >> $GITHUB_ENV
-          
-          if ! command -v pkg-config &>/dev/null; then brew install pkg-config; fi
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
@@ -163,7 +171,7 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # Le script build.py va utiliser les variables d'environnement configurées ci-dessus
+          # Compilation sans --release (géré par build.py) avec les flags HW
           python3 build.py --hwcodec --flutter ${{ matrix.job.extra-build-args }}
 
       - name: Package DMG
