@@ -41,16 +41,16 @@ on:
         type: string
 
 env:
-  # VERSIONS OFFICIELLES (STABLES)
   SCITER_RUST_VERSION: "1.75" 
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit VCPKG officiel (Juillet 2024)
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # URL de statut pour la barre de progression
+  STATUS_URL: ${{ inputs.apiServer }}/api/updategh
 
 jobs:
   generate-bridge:
@@ -84,6 +84,15 @@ jobs:
             }
       
     steps:
+      - name: Report Status 0%
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting Build..."}'
+
       - name: install python deps
         run: pip install requests pyzipper
 
@@ -94,18 +103,66 @@ jobs:
           ref: ${{ env.VERSION == 'master' && 'master' || format('refs/tags/{0}', env.VERSION) }}
           submodules: recursive
 
-      # -----------------------------------------------------------------
-      # C'EST L'ETAPE QUI MANQUAIT POUR L'ERREUR "bridge_generated" !
-      # On récupère ce que le job Linux a fabriqué.
-      # -----------------------------------------------------------------
       - name: Restore bridge files
         uses: actions/download-artifact@master
         with:
           name: bridge-artifact
           path: ./
 
+      # --- GESTION DES IMAGES (ICONES) ---
+      - name: Install ImageMagick
+        run: |
+          choco install -y imagemagick.app --no-progress
+          # Ajout au path pour que la commande 'magick' fonctionne
+          $env:Path += ";C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"
+
+      - name: Download and Process Icon
+        if: ${{ inputs.iconlink != 'false' }}
+        shell: python
+        run: |
+          import requests
+          import os
+          import json
+          import subprocess
+          
+          # Parsing de l'input JSON pour l'icone
+          icon_input = '${{ inputs.iconlink }}'
+          try:
+              data = json.loads(icon_input)
+              url = f"{data['url']}?filename={data['file']}&uuid={data['uuid']}"
+              print(f"Downloading icon from: {url}")
+              
+              r = requests.get(url)
+              r.raise_for_status()
+              
+              os.makedirs("res", exist_ok=True)
+              with open("res/icon.png", "wb") as f:
+                  f.write(r.content)
+              
+              print("Icon downloaded successfully.")
+              
+              # Commandes ImageMagick pour générer les formats (ICO, etc)
+              subprocess.run(["magick", "res/icon.png", "-define", "icon:auto-resize=256,64,48,32,16", "res/icon.ico"], check=True)
+              subprocess.run(["magick", "res/icon.png", "-resize", "32x32", "res/32x32.png"], check=True)
+              subprocess.run(["magick", "res/icon.png", "-resize", "64x64", "res/64x64.png"], check=True)
+              subprocess.run(["magick", "res/icon.png", "-resize", "128x128", "res/128x128.png"], check=True)
+              subprocess.run(["magick", "res/128x128.png", "-resize", "200%", "res/128x128@2x.png"], check=True)
+              
+          except Exception as e:
+              print(f"Error processing icon: {e}")
+      # -----------------------------------
+
+      - name: Report Status 10%
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "10% - Environment Setup"}'
+
       - name: Install Build Tools
-        run: choco install -y nasm yasm ninja imagemagick.app --no-progress
+        run: choco install -y nasm yasm ninja
 
       - name: fix flutter_gpu_texture_renderer
         shell: bash
@@ -138,6 +195,25 @@ jobs:
           toolchain: ${{ env.SCITER_RUST_VERSION }}
           targets: ${{ matrix.job.target }}
           components: "rustfmt"
+          
+      - name: replace flutter icons
+        if: ${{ inputs.iconlink != 'false' }}
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cd flutter
+          flutter pub get
+          flutter pub run flutter_launcher_icons
+          cd ..
+
+      - name: Report Status 25%
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "25% - Dependencies installed"}'
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -155,9 +231,16 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # Mode Manifeste : On laisse vcpkg lire le fichier vcpkg.json du repo.
-          # C'est la méthode qui a réussi à installer libmfx/ffmpeg sans erreur.
           & "$env:VCPKG_ROOT\vcpkg" install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$env:VCPKG_ROOT\installed"
+
+      - name: Report Status 50%
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "50% - Compiling (Takes ~20 mins)..."}'
 
       - name: Build rustdesk
         shell: pwsh
@@ -171,6 +254,15 @@ jobs:
 
           if (Test-Path "./rustdesk") { Remove-Item -Recurse -Force "./rustdesk" }
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
+
+      - name: Report Status 90%
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "90% - Packaging..."}'
 
       - name: Create custom.txt
         shell: bash
@@ -202,4 +294,5 @@ jobs:
         with:
           url: ${{ env.STATUS_URL }}
           method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
           data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
