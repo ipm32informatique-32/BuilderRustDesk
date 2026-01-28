@@ -46,7 +46,7 @@ env:
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # VCPKG récent (2025)
+  # VCPKG récent (2025) pour éviter les erreurs de téléchargement
   VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -144,17 +144,17 @@ jobs:
           Write-Host "Nettoyage du manifeste..."
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # Installation de libvpl (remplaçant de libmfx)
+          # Installation de vpl (remplaçant de libmfx)
           Write-Host "Installation des dependances..."
-          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 libvpl --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 vpl --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
           
-          # LE HACK : On clone libvpl.lib en libmfx.lib pour que RustDesk le trouve !
+          # LE HACK : On clone vpl.lib en libmfx.lib pour que RustDesk le trouve !
           $libPath = "$env:VCPKG_ROOT\installed\x64-windows-static\lib"
-          if (Test-Path "$libPath\libvpl.lib") {
-             Copy-Item "$libPath\libvpl.lib" "$libPath\libmfx.lib" -Force
-             Write-Host "SUCCES: libvpl.lib copie en libmfx.lib (HWCODEC active)"
+          if (Test-Path "$libPath\vpl.lib") {
+             Copy-Item "$libPath\vpl.lib" "$libPath\libmfx.lib" -Force
+             Write-Host "SUCCES: vpl.lib copie en libmfx.lib (HWCODEC active)"
           } else {
-             Write-Warning "ECHEC: libvpl.lib introuvable."
+             Write-Warning "ECHEC: vpl.lib introuvable."
           }
 
       - name: Install Rust
@@ -191,7 +191,7 @@ jobs:
           Remove-Item -Path usbmmidd_v2\Win32, usbmmidd_v2\deviceinstaller64.exe, usbmmidd_v2\deviceinstaller.exe, usbmmidd_v2\usbmmidd.bat -Recurse -ErrorAction SilentlyContinue
           mv -Force .\usbmmidd_v2 ./rustdesk
 
-          # Driver imprimante (VERSION LINÉAIRE SANS TRY/CATCH)
+          # Driver imprimante (VERSION LINÉAIRE SANS TRY/CATCH POUR ÉVITER L'ERREUR DE PARSING)
           Write-Host "Gestion des drivers imprimante..."
           
           $driver1 = "rustdesk_printer_driver_v4-1.4.zip"
