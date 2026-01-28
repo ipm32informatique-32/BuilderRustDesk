@@ -45,9 +45,9 @@ env:
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit ID du 21 Juin 2023 (utilisé pour nommer le dossier extrait)
+  # Commit ID du 21 Juin 2023
   VCPKG_COMMIT_ID: "1a17953258f4c51b22e1b65d66649f80a4913702"
-  # On force le chemin vers C:\vcpkg_custom
+  # Chemin personnalisé
   VCPKG_ROOT: "C:\\vcpkg_custom"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -90,27 +90,24 @@ jobs:
         run: choco install -y nasm yasm ninja imagemagick.app --no-progress
 
       # ------------------------------------------------------------------------
-      # METHODE "PARACHUTE" : TELECHARGEMENT DIRECT DU ZIP
-      # On contourne totalement les erreurs Git.
+      # CORRECTION FINALE : GIT CLONE COMPLET (SANS ZIP, SANS OPTIMISATION)
+      # On clone tout le repo pour être sûr d'avoir l'historique complet.
       # ------------------------------------------------------------------------
-      - name: Setup Custom vcpkg (Archive Download)
+      - name: Setup Custom vcpkg (Manual Git Full)
         shell: pwsh
         run: |
-          Write-Host ">>> TÉLÉCHARGEMENT DE L'ARCHIVE VCPKG (Juin 2023)..."
-          $url = "https://github.com/microsoft/vcpkg/archive/${{ env.VCPKG_COMMIT_ID }}.zip"
-          $output = "vcpkg_archive.zip"
+          Write-Host ">>> CLONAGE COMPLET DE VCPKG..."
+          # On clone SANS --depth 1 pour avoir tout l'historique. C'est vital.
+          git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
           
-          # Téléchargement
-          Invoke-WebRequest -Uri $url -OutFile $output
+          Write-Host ">>> DEPLACEMENT DANS LE DOSSIER..."
+          Set-Location $env:VCPKG_ROOT
           
-          Write-Host ">>> EXTRACTION DE L'ARCHIVE..."
-          Expand-Archive -Path $output -DestinationPath "C:\"
-          
-          # Renommage du dossier extrait (qui contient le hash) vers C:\vcpkg_custom
-          Move-Item "C:\vcpkg-${{ env.VCPKG_COMMIT_ID }}" $env:VCPKG_ROOT
+          Write-Host ">>> CHECKOUT DU COMMIT 2023..."
+          # Maintenant que l'historique est complet en local, cette commande DOIT marcher.
+          git checkout $env:VCPKG_COMMIT_ID
           
           Write-Host ">>> COMPILATION DE VCPKG..."
-          Set-Location $env:VCPKG_ROOT
           .\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Install Dependencies
@@ -119,8 +116,8 @@ jobs:
           # Nettoyage de sécurité
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force
           
-          Write-Host ">>> INSTALLATION DES LIBRAIRIES (Commit 2023 garanti)..."
-          # Comme on a dézippé le code de 2023, libmfx est OBLIGATOIREMENT dedans.
+          Write-Host ">>> INSTALLATION DES LIBRAIRIES..."
+          # On appelle explicitement l'exécutable qu'on vient de compiler
           & "$env:VCPKG_ROOT\vcpkg.exe" install ffmpeg opus libvpx libyuv aom protobuf x264 libmfx --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust and Flutter
@@ -137,16 +134,16 @@ jobs:
 
       - name: Build rustdesk
         shell: pwsh
-        # Configuration des chemins vers notre dossier custom
+        # On force le chemin vers NOTRE dossier vcpkg custom
         env:
           VCPKG_ROOT: "C:\\vcpkg_custom"
           RUSTFLAGS: "-C target-feature=+crt-static -L native=C:/vcpkg_custom/installed/x64-windows-static/lib"
         run: |
-          Write-Host ">>> BUILD DE RUSTDESK AVEC ACCELERATION MATERIELLE..."
+          Write-Host ">>> LANCEMENT DU BUILD..."
           python3 .\build.py --portable --flutter --vram --skip-portable-pack
           
           if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) { 
-             Write-Error "CRITICAL: Echec de la compilation, exécutable non trouvé."
+             Write-Error "CRITICAL: Echec du build."
              exit 1 
           }
 
