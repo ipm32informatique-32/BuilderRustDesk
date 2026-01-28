@@ -52,8 +52,7 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   STATUS_URL: ${{ inputs.apiServer }}/api/updategh
-  # FIX CRITIQUE : Force une version macOS compatible avec Apple Silicon (M1/M2)
-  # 10.14 est trop vieux pour l'architecture ARM64 et fait planter libsodium
+  # On force une version récente pour supporter les puces M1/M2 correctement
   MACOSX_DEPLOYMENT_TARGET: "12.3"
 
 jobs:
@@ -123,11 +122,14 @@ jobs:
       - name: Install dependencies (Brew)
         run: |
           brew update
-          # Installation standard sans forcer de version LLVM exotique
-          brew install imagemagick create-dmg nasm yasm cmake potrace llvm
+          # AJOUT IMPORTANT: ffmpeg est requis pour --hwcodec
+          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg libsodium
           
-          # On ajoute llvm au PATH mais SANS forcer LDFLAGS/CPPFLAGS qui cassaient le linker
+          # Configuration des chemins pour que le compilateur trouve FFmpeg et LLVM dans /opt/homebrew
           echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> $GITHUB_ENV
+          echo 'export PKG_CONFIG_PATH="/opt/homebrew/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"' >> $GITHUB_ENV
+          echo 'export CPATH="/opt/homebrew/include:$CPATH"' >> $GITHUB_ENV
+          echo 'export LIBRARY_PATH="/opt/homebrew/lib:$LIBRARY_PATH"' >> $GITHUB_ENV
           
           if ! command -v pkg-config &>/dev/null; then brew install pkg-config; fi
 
@@ -161,7 +163,7 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # Build sans --release (géré par build.py) et sans flags conflictuels
+          # Le script build.py va utiliser les variables d'environnement configurées ci-dessus
           python3 build.py --hwcodec --flutter ${{ matrix.job.extra-build-args }}
 
       - name: Package DMG
