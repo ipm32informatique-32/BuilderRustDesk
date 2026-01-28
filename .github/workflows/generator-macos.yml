@@ -120,18 +120,13 @@ jobs:
       - name: Install dependencies (Brew)
         run: |
           brew update
-          # FIX: Ajout de llvm@15 ici et suppression de l'étape KyleMayes qui plantait
-          # FIX: Suppression de wget/ninja de la liste pour éviter les warnings "already installed"
           brew install imagemagick create-dmg nasm yasm cmake potrace llvm@15
           
-          # Configuration de LLVM 15 pour qu'il soit trouvé par le build
           echo 'export PATH="/opt/homebrew/opt/llvm@15/bin:$PATH"' >> $GITHUB_ENV
           echo 'LDFLAGS="-L/opt/homebrew/opt/llvm@15/lib"' >> $GITHUB_ENV
           echo 'CPPFLAGS="-I/opt/homebrew/opt/llvm@15/include"' >> $GITHUB_ENV
           
           if ! command -v pkg-config &>/dev/null; then brew install pkg-config; fi
-
-      # SUPPRESSION DE L'ÉTAPE "Install LLVM" QUI PLANTAIT ICI
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
@@ -163,7 +158,8 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          python3 build.py --hwcodec --flutter --release ${{ matrix.job.extra-build-args }}
+          # CORRECTION: Suppression de --release qui n'est pas reconnu par ce build.py
+          python3 build.py --hwcodec --flutter ${{ matrix.job.extra-build-args }}
 
       - name: Package DMG
         run: |
