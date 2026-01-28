@@ -47,7 +47,6 @@ env:
   MAC_RUST_VERSION: "1.81"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit VCPKG pour Mac M1/M2 (Plus récent)
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "1.3.1"
   UPLOAD_ARTIFACT: 'true'
@@ -62,16 +61,27 @@ jobs:
       version: "1.3.1"
 
   build-for-macos:
-    name: Build macOS
+    name: Build macOS (${{ matrix.job.target }})
     needs: [generate-bridge]
-    # CORRECTION ICI : Passage à macos-latest (Apple Silicon) car macos-13 est supprimé
     runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         job:
-          # On garde x86_64 (Intel) via Rosetta, ou on peut cibler aarch64 pour les Macs récents
-          - { target: x86_64-apple-darwin, arch: x86_64, vcpkg-triplet: x64-osx }
+          # Build Intel (x64)
+          - {
+              target: x86_64-apple-darwin,
+              extra-build-args: "",
+              arch: x86_64,
+              vcpkg-triplet: x64-osx,
+            }
+          # Build Apple Silicon (M1/M2/M3)
+          - {
+              target: aarch64-apple-darwin,
+              extra-build-args: "--screencapturekit", # Optimisation pour puces Apple
+              arch: aarch64,
+              vcpkg-triplet: arm64-osx,
+            }
 
     steps:
       - name: Report Status Start
@@ -81,7 +91,7 @@ jobs:
           url: ${{ env.STATUS_URL }}
           method: 'POST'
           customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting macOS Build..."}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting macOS Build (${{ matrix.job.arch }})..."}'
 
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -98,6 +108,9 @@ jobs:
           echo "apiServer=${{ inputs.apiServer }}" >> $GITHUB_ENV
           echo "uuid=${{ inputs.uuid }}" >> $GITHUB_ENV
           echo "filename=${{ inputs.filename }}" >> $GITHUB_ENV
+          
+          # FIX: Création du dossier manquant
+          mkdir -p libs/hbb_common/src/config
           echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
 
       - name: Restore bridge files
@@ -109,7 +122,6 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          # Installation des outils nécessaires
           brew install imagemagick create-dmg nasm yasm cmake ninja wget potrace
           if ! command -v pkg-config &>/dev/null; then brew install pkg-config; fi
 
@@ -137,12 +149,9 @@ jobs:
 
       - name: Update Info.plist & Config
         run: |
-          # Mise à jour des noms dans les fichiers de configuration Mac
           sed -i '' -e 's|<key>CFBundleName</key>.*<string>.*</string>|<key>CFBundleName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
           sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
           sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ env.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
-          
-          # Mise à jour de la config RustDesk (Serveur et Clé)
           sed -i -e 's|rs-ny.rustdesk.com|${{ env.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ env.key }}|' ./libs/hbb_common/src/config.rs
 
@@ -151,8 +160,7 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # Lancement du build
-          python3 build.py --hwcodec --flutter --release
+          python3 build.py --hwcodec --flutter --release ${{ matrix.job.extra-build-args }}
 
       - name: Package DMG
         run: |
@@ -161,12 +169,18 @@ jobs:
             mv "$APP_PATH" "flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
             APP_PATH="flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
           fi
-          # Création de l'image disque
-          create-dmg --volname "${{ env.appname }}" "${{ env.filename }}.dmg" "$APP_PATH"
+          
+          # Nom unique pour le DMG selon l'architecture
+          DMG_NAME="${{ env.filename }}-${{ matrix.job.arch }}.dmg"
+          
+          create-dmg --volname "${{ env.appname }}" "$DMG_NAME" "$APP_PATH"
+          
+          # Renommage pour l'upload (évite confusion si on upload les deux)
+          echo "DMG_OUTPUT=$DMG_NAME" >> $GITHUB_ENV
 
       - name: Upload to Server
         run: |
-          curl -X POST -F "file=@${{ env.filename }}.dmg" -F "uuid=${{ inputs.uuid }}" ${{ inputs.apiServer }}/api/save_custom_client
+          curl -X POST -F "file=@${{ env.DMG_OUTPUT }}" -F "uuid=${{ inputs.uuid }}" ${{ inputs.apiServer }}/api/save_custom_client
 
       - name: Report Success
         uses: fjogeleit/http-request-action@v1
@@ -174,13 +188,4 @@ jobs:
           url: ${{ env.STATUS_URL }}
           method: 'POST'
           customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
-
-      - name: Report Failure
-        if: failure()
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Failed (See GitHub Actions)"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success (${{ matrix.job.arch }})"}'
