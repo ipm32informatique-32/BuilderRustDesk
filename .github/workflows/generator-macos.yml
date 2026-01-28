@@ -20,14 +20,6 @@ on:
       uuid:
         required: true
         type: string
-      iconlink:
-        required: false
-        default: 'false'
-        type: string
-      logolink:
-        required: false
-        default: 'false'
-        type: string
       appname:
         required: true
         default: 'rustdesk'
@@ -35,10 +27,6 @@ on:
       filename:
         required: true
         default: 'rustdesk'
-        type: string
-      extras:
-        required: true
-        default: '{}'
         type: string
 
 env:
@@ -52,7 +40,8 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   STATUS_URL: ${{ inputs.apiServer }}/api/updategh
-  MACOSX_DEPLOYMENT_TARGET: "12.3"
+  # On laisse la target déploiement au script de build ou on la fixe bas pour compatibilité
+  MACOSX_DEPLOYMENT_TARGET: "10.15"
 
 jobs:
   generate-bridge:
@@ -63,23 +52,28 @@ jobs:
   build-for-macos:
     name: Build macOS (${{ matrix.job.target }})
     needs: [generate-bridge]
-    runs-on: macos-latest
+    # Utilisation dynamique de l'OS selon la matrice
+    runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
-          # Build Intel (x64)
+          # Intel: Utilise macos-13 qui est un runner Intel natif
+          # Les librairies seront dans /usr/local
           - {
               target: x86_64-apple-darwin,
               extra-build-args: "",
               arch: x86_64,
+              os: macos-13,
               vcpkg-triplet: x64-osx,
             }
-          # Build Apple Silicon (M1/M2/M3)
+          # Apple Silicon: Utilise macos-14 qui est un runner ARM64 natif
+          # Les librairies seront dans /opt/homebrew
           - {
               target: aarch64-apple-darwin,
-              extra-build-args: "--screencapturekit",
+              extra-build-args: "--hwcodec --screencapturekit",
               arch: aarch64,
+              os: macos-14,
               vcpkg-triplet: arm64-osx,
             }
 
@@ -109,6 +103,9 @@ jobs:
           echo "uuid=${{ inputs.uuid }}" >> $GITHUB_ENV
           echo "filename=${{ inputs.filename }}" >> $GITHUB_ENV
           
+          # Configuration VCPKG
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg" >> $GITHUB_ENV
+          
           mkdir -p libs/hbb_common/src/config
           echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
 
@@ -121,36 +118,33 @@ jobs:
       - name: Install dependencies (Brew)
         run: |
           brew update
-          # Force l'installation de ffmpeg@5 sur toutes les architectures
-          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config
+          # Installation de ffmpeg@5 et autres dépendances
+          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config git wget
           
-          # Détection du préfixe Homebrew
-          if [ -d "/opt/homebrew" ]; then
-            HB_PREFIX="/opt/homebrew"
-          else
-            HB_PREFIX="/usr/local"
-          fi
+          # Récupération dynamique du préfixe Brew (sera /usr/local sur Intel et /opt/homebrew sur ARM)
+          HB_PREFIX=$(brew --prefix)
           
-          # 1. Configuration des binaires
+          echo "Homebrew Prefix is: $HB_PREFIX"
+          
+          # Configuration des chemins
           echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
-          
-          # 2. Configuration pour pkg-config (utilisé par les scripts de build Rust)
           echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           
-          # 3. Flags pour le compilateur C/C++ (headers)
+          # Flags C/C++
           echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           
-          # 4. Flags pour le Linker C (librairies)
+          # Flags Linker
           echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$HB_PREFIX/lib:$HB_PREFIX/opt/ffmpeg@5/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           
-          # 5. Flags pour Bindgen (génération des bindings Rust)
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
-          
-          # 6. CRUCIAL : Flags pour le compilateur RUST (pour qu'il trouve les .a/.dylib)
-          # Sans ça, on obtient "could not find native static library"
+          # Flags Rust (Crucial pour qu'il trouve les .a/.dylib de ffmpeg)
           echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
+          
+          # Flags Bindgen (Crucial pour qu'il trouve les headers de ffmpeg ET vcpkg)
+          # On ajoute le chemin vcpkg ici préventivement
+          VCPKG_INCLUDE="$GITHUB_WORKSPACE/vcpkg/installed/${{ matrix.job.vcpkg-triplet }}/include"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include -I$VCPKG_INCLUDE" >> $GITHUB_ENV
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
@@ -182,7 +176,8 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          python3 build.py --hwcodec --flutter ${{ matrix.job.extra-build-args }}
+          # VCPKG bootstrap si nécessaire (le script build.py le fait, mais on s'assure des vars)
+          python3 build.py --flutter ${{ matrix.job.extra-build-args }}
 
       - name: Package DMG
         run: |
