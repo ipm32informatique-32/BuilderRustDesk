@@ -52,7 +52,6 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   STATUS_URL: ${{ inputs.apiServer }}/api/updategh
-  # On définit la cible de déploiement globalement
   MACOSX_DEPLOYMENT_TARGET: "12.3"
 
 jobs:
@@ -122,30 +121,29 @@ jobs:
       - name: Install dependencies (Brew)
         run: |
           brew update
-          # Installation des outils et de ffmpeg requis pour hwcodec
-          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg libsodium pkg-config
+          # --- CORRECTION ICI : Utilisation de ffmpeg@5 au lieu de ffmpeg ---
+          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config
           
-          # Détection du préfixe Homebrew (dynamique selon l'architecture)
+          # Détection du préfixe Homebrew
           if [ -d "/opt/homebrew" ]; then
             HB_PREFIX="/opt/homebrew"
           else
             HB_PREFIX="/usr/local"
           fi
           
-          # Configuration des chemins pour que le compilateur trouve FFmpeg et LLVM
-          echo "PATH=$HB_PREFIX/opt/llvm/bin:$PATH" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          # Configuration des chemins pour que le compilateur trouve FFmpeg@5 et LLVM
+          # Notez l'ajout de "opt/ffmpeg@5" dans les chemins
+          echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           
-          # Flags pour le compilateur C/C++ (C'est ici que la correction opère)
-          # On inclut explicitement les dossiers headers de ffmpeg
-          echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg/include" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg/include" >> $GITHUB_ENV
-          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg/lib" >> $GITHUB_ENV
+          # Flags pour le compilateur C/C++ pointant vers ffmpeg@5
+          echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
           
-          # Flags pour Bindgen (utilisé par les crates Rust qui parlent au C)
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg/include" >> $GITHUB_ENV
+          # Flags pour Bindgen
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           
-          # Variables de repli pour certains compilateurs
           echo "CPATH=$HB_PREFIX/include:$CPATH" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$HB_PREFIX/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
@@ -179,7 +177,6 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # Compilation sans --release (géré par build.py) avec les flags HW
           python3 build.py --hwcodec --flutter ${{ matrix.job.extra-build-args }}
 
       - name: Package DMG
