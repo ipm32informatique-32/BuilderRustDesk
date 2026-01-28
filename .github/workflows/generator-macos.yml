@@ -52,6 +52,9 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   STATUS_URL: ${{ inputs.apiServer }}/api/updategh
+  # FIX CRITIQUE : Force une version macOS compatible avec Apple Silicon (M1/M2)
+  # 10.14 est trop vieux pour l'architecture ARM64 et fait planter libsodium
+  MACOSX_DEPLOYMENT_TARGET: "12.3"
 
 jobs:
   generate-bridge:
@@ -120,11 +123,11 @@ jobs:
       - name: Install dependencies (Brew)
         run: |
           brew update
-          brew install imagemagick create-dmg nasm yasm cmake potrace llvm@15
+          # Installation standard sans forcer de version LLVM exotique
+          brew install imagemagick create-dmg nasm yasm cmake potrace llvm
           
-          echo 'export PATH="/opt/homebrew/opt/llvm@15/bin:$PATH"' >> $GITHUB_ENV
-          echo 'LDFLAGS="-L/opt/homebrew/opt/llvm@15/lib"' >> $GITHUB_ENV
-          echo 'CPPFLAGS="-I/opt/homebrew/opt/llvm@15/include"' >> $GITHUB_ENV
+          # On ajoute llvm au PATH mais SANS forcer LDFLAGS/CPPFLAGS qui cassaient le linker
+          echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> $GITHUB_ENV
           
           if ! command -v pkg-config &>/dev/null; then brew install pkg-config; fi
 
@@ -158,7 +161,7 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # CORRECTION: Suppression de --release qui n'est pas reconnu par ce build.py
+          # Build sans --release (géré par build.py) et sans flags conflictuels
           python3 build.py --hwcodec --flutter ${{ matrix.job.extra-build-args }}
 
       - name: Package DMG
