@@ -41,10 +41,12 @@ on:
         type: string
 
 env:
+  # VERSIONS OFFICIELLES (STABLES)
   SCITER_RUST_VERSION: "1.75" 
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
+  # Commit VCPKG officiel (Juillet 2024)
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -91,6 +93,16 @@ jobs:
           repository: rustdesk/rustdesk
           ref: ${{ env.VERSION == 'master' && 'master' || format('refs/tags/{0}', env.VERSION) }}
           submodules: recursive
+
+      # -----------------------------------------------------------------
+      # C'EST L'ETAPE QUI MANQUAIT POUR L'ERREUR "bridge_generated" !
+      # On récupère ce que le job Linux a fabriqué.
+      # -----------------------------------------------------------------
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
+        with:
+          name: bridge-artifact
+          path: ./
 
       - name: Install Build Tools
         run: choco install -y nasm yasm ninja imagemagick.app --no-progress
@@ -143,7 +155,8 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # CORRECTION SYNTAXE POWERSHELL ICI
+          # Mode Manifeste : On laisse vcpkg lire le fichier vcpkg.json du repo.
+          # C'est la méthode qui a réussi à installer libmfx/ffmpeg sans erreur.
           & "$env:VCPKG_ROOT\vcpkg" install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Build rustdesk
