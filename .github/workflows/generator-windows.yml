@@ -46,7 +46,7 @@ env:
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # VCPKG récent (Jan 2025)
+  # VCPKG récent (2025)
   VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -141,19 +141,18 @@ jobs:
       - name: Install Dependencies
         shell: pwsh
         run: |
-          # 1. Nettoyage
           Write-Host "Nettoyage du manifeste..."
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # 2. Installation (Avec libvpl au lieu de libmfx)
+          # Installation de libvpl (remplaçant de libmfx)
           Write-Host "Installation des dependances..."
           & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 libvpl --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
           
-          # 3. LE HACK : On clone libvpl.lib en libmfx.lib pour que RustDesk le trouve !
+          # LE HACK : On clone libvpl.lib en libmfx.lib pour que RustDesk le trouve !
           $libPath = "$env:VCPKG_ROOT\installed\x64-windows-static\lib"
           if (Test-Path "$libPath\libvpl.lib") {
              Copy-Item "$libPath\libvpl.lib" "$libPath\libmfx.lib" -Force
-             Write-Host "SUCCÈS: libvpl.lib copié en libmfx.lib (HWCODEC activé)"
+             Write-Host "SUCCES: libvpl.lib copie en libmfx.lib (HWCODEC active)"
           } else {
              Write-Warning "ECHEC: libvpl.lib introuvable."
           }
@@ -171,11 +170,11 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- COMPILATION (HWCODEC ACTIVÉ + SYNTAXE CORRIGÉE) ---
+      # --- COMPILATION (HWCODEC ACTIVÉ + SYNTAXE PLATE) ---
       - name: Build rustdesk
         shell: pwsh
         run: |
-          # COMMANDE FINALE : HWCODEC ACTIVÉ
+          # HWCODEC est active
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) {
@@ -186,34 +185,36 @@ jobs:
           if (Test-Path "./rustdesk") { Remove-Item -Recurse -Force "./rustdesk" }
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
 
+          # Driver ecran virtuel
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath . -Force
           Remove-Item -Path usbmmidd_v2\Win32, usbmmidd_v2\deviceinstaller64.exe, usbmmidd_v2\deviceinstaller.exe, usbmmidd_v2\usbmmidd.bat -Recurse -ErrorAction SilentlyContinue
           mv -Force .\usbmmidd_v2 ./rustdesk
 
-          # GESTION IMPRIMANTE SIMPLIFIÉE (Plus de try/catch complexe)
-          Write-Host "Téléchargement des drivers d'imprimante..."
-          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip -ErrorAction SilentlyContinue
-          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip -ErrorAction SilentlyContinue
+          # Driver imprimante (VERSION LINÉAIRE SANS TRY/CATCH)
+          Write-Host "Gestion des drivers imprimante..."
           
-          if (Test-Path "rustdesk_printer_driver_v4-1.4.zip") {
-            Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath . -Force -ErrorAction SilentlyContinue
+          $driver1 = "rustdesk_printer_driver_v4-1.4.zip"
+          $driver2 = "printer_driver_adapter.zip"
+          
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/hbb_common/releases/download/driver/$driver1" -OutFile $driver1 -ErrorAction SilentlyContinue
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/hbb_common/releases/download/driver/$driver2" -OutFile $driver2 -ErrorAction SilentlyContinue
+          
+          if (Test-Path $driver1) {
+             Expand-Archive $driver1 -DestinationPath . -Force -ErrorAction SilentlyContinue
+             if (!(Test-Path "./rustdesk/drivers/RustDeskPrinterDriver")) { 
+                New-Item -ItemType Directory -Path "./rustdesk/drivers/RustDeskPrinterDriver" -Force 
+             }
+             if (Test-Path ".\rustdesk_printer_driver_v4-1.4") {
+                Copy-Item -Path ".\rustdesk_printer_driver_v4-1.4\*" -Destination "./rustdesk/drivers/RustDeskPrinterDriver/" -Recurse -Force
+             }
           }
           
-          if (!(Test-Path "./rustdesk/drivers/RustDeskPrinterDriver")) { 
-             New-Item -ItemType Directory -Path "./rustdesk/drivers/RustDeskPrinterDriver" -Force 
-          }
-          
-          if (Test-Path ".\rustdesk_printer_driver_v4-1.4") {
-             Copy-Item -Path ".\rustdesk_printer_driver_v4-1.4\*" -Destination "./rustdesk/drivers/RustDeskPrinterDriver/" -Recurse -Force
-          }
-          
-          if (Test-Path "printer_driver_adapter.zip") {
-            Expand-Archive printer_driver_adapter.zip -DestinationPath . -Force -ErrorAction SilentlyContinue
-          }
-
-          if (Test-Path ".\printer_driver_adapter.dll") {
-             Move-Item -Path ".\printer_driver_adapter.dll" -Destination "./rustdesk/" -Force
+          if (Test-Path $driver2) {
+             Expand-Archive $driver2 -DestinationPath . -Force -ErrorAction SilentlyContinue
+             if (Test-Path ".\printer_driver_adapter.dll") {
+                Move-Item -Path ".\printer_driver_adapter.dll" -Destination "./rustdesk/" -Force
+             }
           }
 
       - name: icon stuff (post-build)
