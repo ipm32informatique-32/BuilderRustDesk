@@ -1,4 +1,4 @@
-name: Custom macOS Client Generator (VCPKG Fix)
+name: Custom macOS Client Generator (Final Fix)
 run-name: Build macOS ${{ inputs.appname }} (${{ inputs.version }})
 
 on:
@@ -46,14 +46,16 @@ permissions:
   actions: write
 
 env:
+  # Versions
   SCITER_RUST_VERSION: "1.75"
   RUST_VERSION: "1.75"
   MAC_RUST_VERSION: "1.81"
   FLUTTER_VERSION: "3.24.5"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
-  # Correction URL (suppression du double /api)
+  # Correction URL API
   STATUS_URL: ${{ inputs.apiServer }}/updategh
+  # Cible minimale
   MACOSX_DEPLOYMENT_TARGET: "10.15"
 
 jobs:
@@ -71,7 +73,8 @@ jobs:
       matrix:
         include:
           # --- INTEL (x86_64) ---
-          - os: macos-13
+          # On utilise macos-12 car macos-13 est retiré et macos-14 est ARM seulement
+          - os: macos-12
             arch: x86_64
             arch-name: "Intel (x86_64)"
             target: x86_64-apple-darwin
@@ -107,7 +110,7 @@ jobs:
           ref: master
           submodules: recursive
 
-      - name: Setup Config
+      - name: Setup Config Variables
         run: |
           echo "appname=${{ inputs.appname }}" >> $GITHUB_ENV
           echo "filename=${{ inputs.filename }}" >> $GITHUB_ENV
@@ -118,7 +121,7 @@ jobs:
           sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
 
-      - name: Download Bridge
+      - name: Restore Bridge
         uses: actions/download-artifact@master
         with:
           name: bridge-artifact
@@ -129,45 +132,52 @@ jobs:
           brew update
           brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config git wget
           
+          # Détection automatique du chemin Brew (Intel vs ARM)
           HB_PREFIX=$(brew --prefix)
           echo "HB_PREFIX=$HB_PREFIX" >> $GITHUB_ENV
           
-          # Configuration des chemins pour le shell actuel
+          # Chemins système
           echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          
+          # Flags globaux pour C/C++ (FFmpeg)
+          echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$HB_PREFIX/lib:$HB_PREFIX/opt/ffmpeg@5/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          
+          # Flags globaux pour Rust (Linker)
+          echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
 
-      - name: Fix VCPKG & Bindgen Headers
+      - name: Install & Fix VCPKG (Force Headers)
         run: |
-          # VCPKG est inclus en submodule dans RustDesk, il faut juste le bootstrapper
-          if [ -d "vcpkg" ]; then
-              cd vcpkg
-              ./bootstrap-vcpkg.sh
-              echo "VCPKG bootstrapped."
-              cd ..
-          else
-              echo "Error: vcpkg folder not found!"
-              exit 1
+          # Initialisation forcée de VCPKG
+          if [ ! -d "vcpkg" ]; then
+             echo "VCPKG not found, cloning..."
+             git clone https://github.com/microsoft/vcpkg.git
           fi
-
-          # Construction des chemins d'inclusion CRITIQUES
+          
+          cd vcpkg
+          ./bootstrap-vcpkg.sh
+          
+          # Installation des libs requises
+          echo "Installing libraries for ${{ matrix.vcpkg-triplet }}..."
+          ./vcpkg install libyuv libvpx aom --triplet=${{ matrix.vcpkg-triplet }}
+          
+          # --- LA SOLUTION POUR L'ERREUR DE COMPILATION ---
+          # On construit les chemins absolus
           V_INC="$GITHUB_WORKSPACE/vcpkg/installed/${{ matrix.vcpkg-triplet }}/include"
-          HB_INC="$HB_PREFIX/opt/ffmpeg@5/include"
-          HB_LIB="$HB_PREFIX/opt/ffmpeg@5/lib"
-
-          # Injection massive pour que Bindgen trouve libyuv/convert.h
+          HB_INC="$(brew --prefix)/opt/ffmpeg@5/include"
+          
+          # On injecte ces chemins partout pour que Bindgen/Clang les trouve
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
           echo "CPATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           echo "C_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           echo "CPLUS_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           
-          # Flags standards
+          # On met à jour CFLAGS pour inclure aussi VCPKG
           echo "CFLAGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
           echo "CXXFLAGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
-          echo "LDFLAGS=-L$HB_LIB" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$HB_LIB" >> $GITHUB_ENV
-          
-          # Flags Rust
-          echo "RUSTFLAGS=-L native=$HB_LIB" >> $GITHUB_ENV
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
@@ -192,10 +202,8 @@ jobs:
           sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
           sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ env.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
 
-      - name: Build RustDesk
+      - name: Build Application (Python)
         run: |
-          # Le script build.py installera les dépendances vcpkg manquantes (libyuv, etc.)
-          # Grâce aux variables d'environnement définies plus haut, la compilation devrait réussir
           python3 build.py --flutter ${{ matrix.build-args }}
 
       - name: Package DMG
@@ -208,6 +216,7 @@ jobs:
           fi
           
           DMG_NAME="${{ inputs.filename }}-${{ matrix.arch }}.dmg"
+          
           create-dmg --volname "${{ env.appname }}" "$DMG_NAME" "$APP_DEST"
           
           echo "DMG_OUTPUT=$DMG_NAME" >> $GITHUB_ENV
