@@ -19,6 +19,14 @@ on:
       uuid:
         required: true
         type: string
+      iconlink:
+        required: false
+        default: 'false'
+        type: string
+      logolink:
+        required: false
+        default: 'false'
+        type: string
       appname:
         required: true
         default: 'rustdesk'
@@ -33,16 +41,16 @@ on:
         type: string
 
 env:
-  # ON GARDE CES VERSIONS STRICTES CAR ELLES FONCTIONNENT DANS LE FICHIER D'ORIGINE
+  # VERSIONS STRICTEMENT IDENTIQUES AU FICHIER OFFICIEL QUI FONCTIONNE
   SCITER_RUST_VERSION: "1.75" 
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit VCPKG de Juillet 2024 (Celui du fichier qui marche)
+  # Commit VCPKG de Juillet 2024 (Celui du fichier officiel)
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
-  # Important pour le cache
+  # Important pour le cache GitHub
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
@@ -65,6 +73,10 @@ jobs:
     name: Build Windows
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
+    env:
+      STATUS_URL: ${{ inputs.apiServer }}/api/updategh
+    
+    # Stratégie matrice identique au fichier officiel
     strategy:
       fail-fast: false
       matrix:
@@ -136,19 +148,19 @@ jobs:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
 
-      # INSTALLATION DEPENDANCES (Mode Manifeste - Le secret est ici !)
+      # INSTALLATION DEPENDANCES (Mode Manifeste - Le secret de la réussite)
+      # On ne liste PAS les paquets manuellement. On laisse vcpkg lire le vcpkg.json du repo.
       - name: Install vcpkg dependencies
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # On ne liste PAS les paquets. On laisse vcpkg lire le fichier vcpkg.json du repo
           $env:VCPKG_ROOT\vcpkg install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Build rustdesk
         shell: pwsh
         env:
           VCPKG_ROOT: "C:\\vcpkg"
-          # On garde le fix du linker au cas où
+          # On garde RUSTFLAGS minimaliste comme dans le fichier original
           RUSTFLAGS: "-C target-feature=+crt-static" 
         run: |
           # Commande de build exacte du fichier d'origine
@@ -187,6 +199,6 @@ jobs:
         if: success()
         uses: fjogeleit/http-request-action@v1
         with:
-          url: ${{ inputs.apiServer }}/api/updategh
+          url: ${{ env.STATUS_URL }}
           method: 'POST'
           data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
