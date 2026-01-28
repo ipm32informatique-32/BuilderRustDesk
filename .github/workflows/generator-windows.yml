@@ -4,62 +4,49 @@ on:
   workflow_dispatch:
     inputs:
       server:
-        description: 'Rendezvous Server'
         required: true
-        default: ''
         type: string
       key:
-        description: 'Public Key'
         required: true
-        default: ''
         type: string
       apiServer:
-        description: 'API Server'
         required: true
-        default: ''
         type: string
       custom:
-        description: "Custom JSON"
         required: true
         default: ''
         type: string
       uuid:
-        description: "uuid of request"
         required: true
-        default: ''
         type: string
       iconlink:
-        description: "icon link"
         required: false
         default: 'false'
         type: string
       logolink:
-        description: "logo link"
         required: false
         default: 'false'
         type: string
       appname:
-        description: "app name"
         required: true
         default: 'rustdesk'
         type: string
       filename:
-        description: "Filename"
         required: true
         default: 'rustdesk'
         type: string
       extras:
-        description: "extra inputs in json"
         required: true
         default: '{}'
         type: string
 
 env:
-  SCITER_RUST_VERSION: "1.75"
-  RUST_VERSION: "1.75"
+  # Utilisation de Rust 1.78 pour éviter les warnings "static_mut_refs"
+  SCITER_RUST_VERSION: "1.78"
+  RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # RETOUR A UNE VERSION RECENTE (Jan 2025) pour avoir des liens valides
+  # Commit récent (2025) pour éviter les erreurs 404 de téléchargement
   VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -150,16 +137,15 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
-      # --- INSTALLATION DEPENDANCES (FIX LIENS & LIBMFX) ---
+      # --- INSTALLATION DEPENDANCES ---
       - name: Install Dependencies
         shell: pwsh
         run: |
-          # 1. Suppression brutale de vcpkg.json
+          # Suppression du manifeste pour forcer le mode classique
           Write-Host "Recherche et suppression de vcpkg.json..."
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # 2. Installation SANS libmfx (introuvable) et AVEC flag classic (supporté par vcpkg récent)
-          # On utilise vcpkg récent, donc les téléchargements MSYS2 fonctionneront.
+          # Installation SANS libmfx (car supprimé dans cette version de vcpkg)
           & "$env:VCPKG_ROOT\vcpkg" install --classic ffmpeg opus libvpx libyuv aom protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust
@@ -175,12 +161,19 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- COMPILATION ---
+      # --- COMPILATION (MODIFICATION CRITIQUE ICI) ---
       - name: Build rustdesk
         shell: pwsh
         run: |
-          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          # RETRAIT de '--hwcodec' car libmfx est manquant. Cela permet de finir la compilation.
+          python3 .\build.py --portable --flutter --vram --skip-portable-pack
           
+          # Vérification que l'exe existe bien
+          if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) {
+             Write-Error "CRITICAL: rustdesk.exe was not created."
+             exit 1
+          }
+
           if (Test-Path "./rustdesk") { Remove-Item -Recurse -Force "./rustdesk" }
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
 
@@ -232,140 +225,4 @@ jobs:
           path: "./rustdesk"
 
       - name: Report Status
-        uses: fjogeleit/http-request-action@v1
-        continue-on-error: true
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "70% complete (Packing)"}'
-
-      # --- PACKAGING ---
-      - name: zip dlls
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          Compress-Archive -Path ./rustdesk/*.dll, ./rustdesk/*.exe -DestinationPath ./rustdesk/unsigned_files.zip -CompressionLevel Fastest
-
-      - name: sign dlls
-        continue-on-error: true
-        shell: bash
-        run: |
-          if [ ! -z "${{ secrets.SIGN_BASE_URL }}" ] && [ ! -z "${{ secrets.SIGN_API_KEY }}" ]; then
-            curl -X POST -F "file=@./rustdesk/unsigned_files.zip" \
-              -H "X-API-KEY: ${{ secrets.SIGN_API_KEY }}" \
-              -m 900 \
-              "${{ secrets.SIGN_BASE_URL }}/sign/" -o ./rustdesk/signed_files.zip
-          else
-            cp ./rustdesk/unsigned_files.zip ./rustdesk/signed_files.zip
-          fi
-
-      - name: unzip dlls
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          Expand-Archive -Path ./rustdesk/signed_files.zip -DestinationPath ./rustdesk/ -Force
-          Remove-Item ./rustdesk/unsigned_files.zip
-          Remove-Item ./rustdesk/signed_files.zip
-
-      - name: Create custom.txt file
-        shell: bash
-        run: |
-          echo -n "${{ inputs.custom }}" | cat > ./rustdesk/custom_.txt
-
-      - name: Build self-extracted executable
-        shell: bash
-        if: env.UPLOAD_ARTIFACT == 'true'
-        run: |
-          mv "./rustdesk/rustdesk.exe" "./rustdesk/${{ inputs.appname }}.exe" || echo "rustdesk.exe"
-          sed -i '/dpiAware/d' res/manifest.xml
-          pushd ./libs/portable
-          pip3 install -r requirements.txt
-          python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/${{ inputs.appname }}.exe"
-          popd
-          mkdir -p ./SignOutput
-          mv ./target/release/rustdesk-portable-packer.exe "./SignOutput/rustdesk.exe"
-
-      - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Build msi
-        continue-on-error: true
-        if: env.UPLOAD_ARTIFACT == 'true'
-        run: |
-          $myappname = "${{ inputs.appname }}" -replace '\s','_'
-          cp "rustdesk/${{ inputs.appname }}.exe" "rustdesk/${myappname}.exe" -ErrorAction SilentlyContinue
-          pushd ./res/msi
-          python preprocess.py --app-name "$myappname" --arp -d ../../rustdesk
-          nuget restore msi.sln
-          msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
-          cp ./Package/bin/x64/Release/en-us/Package.msi ../../SignOutput/rustdesk-latest.msi
-          mv ./Package/bin/x64/Release/en-us/Package.msi ../../SignOutput/rustdesk.msi
-
-      - name: zip exe and msi
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          Compress-Archive -Path ./SignOutput/*.exe, ./SignOutput/*.msi -DestinationPath ./SignOutput/unsigned_files.zip -CompressionLevel Fastest
-
-      - name: sign exe and msi
-        continue-on-error: true
-        shell: bash
-        run: |
-          if [ ! -z "${{ secrets.SIGN_BASE_URL }}" ] && [ ! -z "${{ secrets.SIGN_API_KEY }}" ]; then
-            curl -X POST -F "file=@./SignOutput/unsigned_files.zip" \
-              -H "X-API-KEY: ${{ secrets.SIGN_API_KEY }}" \
-              -m 900 \
-              "${{ secrets.SIGN_BASE_URL }}/sign/" -o ./SignOutput/signed_files.zip
-          else
-            cp ./SignOutput/unsigned_files.zip ./SignOutput/signed_files.zip
-          fi
-
-      - name: unzip exe and msi
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          Expand-Archive -Path ./SignOutput/signed_files.zip -DestinationPath ./SignOutput/ -Force
-          Remove-Item ./SignOutput/unsigned_files.zip
-          Remove-Item ./SignOutput/signed_files.zip
-
-      - name: rename rustdesk.exe to filename.exe
-        run: |
-          mv ./SignOutput/rustdesk.exe "./SignOutput/${{ inputs.filename }}.exe" || echo "rustdesk"
-
-      - name: rename rustdesk.msi to filename.msi
-        continue-on-error: true
-        run: |
-          mv ./SignOutput/rustdesk.msi "./SignOutput/${{ inputs.filename }}.msi" || echo "rustdesk"
-
-      - name: send file to api server
-        shell: bash
-        run: |
-          curl -i -X POST -H "Content-Type: multipart/form-data" \
-            -H "Authorization: Bearer ${{ fromJson(inputs.extras).token }}" \
-            -F "file=@./SignOutput/${{ inputs.filename }}.exe" \
-            -F "uuid=${{ inputs.uuid }}" \
-            ${{ inputs.apiServer }}/api/save_custom_client
-            
-          curl -i -X POST -H "Content-Type: multipart/form-data" \
-            -H "Authorization: Bearer ${{ fromJson(inputs.extras).token }}" \
-            -F "file=@./SignOutput/${{ inputs.filename }}.msi" \
-            -F "uuid=${{ inputs.uuid }}" \
-            ${{ inputs.apiServer }}/api/save_custom_client || true
-
-      - name: Report Status
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
-
-      - name: failed
-        if: failure()
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Generation failed, try again"}'
+        uses: fjogeleit/http
