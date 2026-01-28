@@ -1,20 +1,17 @@
 name: Custom macOS Client Generator
 run-name: Custom macOS Client Generator
 
-on: 
+on:
   workflow_dispatch:
     inputs:
       server:
         required: false
-        default: ''
         type: string
       key:
         required: false
-        default: ''
         type: string
       apiServer:
         required: false
-        default: ''
         type: string
       custom:
         required: false
@@ -22,7 +19,6 @@ on:
         type: string
       uuid:
         required: false
-        default: ''
         type: string
       iconlink:
         required: false
@@ -44,10 +40,10 @@ on:
         required: false
         default: '{}'
         type: string
-  
-  # Au cas où votre API utiliserait cet event (fréquent pour les triggers externes)
-  repository_dispatch:
-    types: [build-client]
+
+permissions:
+  contents: write
+  actions: write
 
 env:
   SCITER_RUST_VERSION: "1.75"
@@ -59,9 +55,160 @@ env:
   UPLOAD_ARTIFACT: 'true'
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
-  STATUS_URL: ${{ github.event.inputs.apiServer }}/api/updategh
-  # On force une version basse pour la compatibilité, mais on laisse le runner décider
+  STATUS_URL: ${{ inputs.apiServer }}/api/updategh
   MACOSX_DEPLOYMENT_TARGET: "10.15"
 
 jobs:
-  # ... (Le reste du fichier reste identique à ma proposition précédente avec les jobs build-for-macos)
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+    with:
+      version: "1.3.1"
+
+  build-for-macos:
+    name: Build macOS (${{ matrix.arch }})
+    needs: [generate-bridge]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Configuration pour Intel (x86_64)
+          # Utilise macos-13 (Intel) pour éviter l'erreur "avcodec not found"
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            os: macos-13
+            vcpkg_triplet: x64-osx
+            extra_args: ""
+            
+          # Configuration pour Apple Silicon (ARM64)
+          # Utilise macos-14 (ARM)
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            os: macos-14
+            vcpkg_triplet: arm64-osx
+            extra_args: "--hwcodec --screencapturekit"
+
+    steps:
+      - name: Report Status Start
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting macOS Build (${{ matrix.arch }})..."}'
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: master
+          submodules: recursive
+
+      - name: Setup Environment Variables
+        run: |
+          echo "appname=${{ inputs.appname }}" >> $GITHUB_ENV
+          echo "server=${{ inputs.server }}" >> $GITHUB_ENV
+          echo "key=${{ inputs.key }}" >> $GITHUB_ENV
+          echo "apiServer=${{ inputs.apiServer }}" >> $GITHUB_ENV
+          echo "uuid=${{ inputs.uuid }}" >> $GITHUB_ENV
+          echo "filename=${{ inputs.filename }}" >> $GITHUB_ENV
+          
+          # Force le chemin VCPKG
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg" >> $GITHUB_ENV
+          
+          mkdir -p libs/hbb_common/src/config
+          echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install dependencies (Brew)
+        run: |
+          brew update
+          # Installation de ffmpeg@5 et dépendances
+          brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config git wget
+          
+          # Récupération dynamique du préfixe Brew (/usr/local sur Intel, /opt/homebrew sur ARM)
+          HB_PREFIX=$(brew --prefix)
+          echo "Homebrew Prefix is: $HB_PREFIX"
+          
+          # Configuration des chemins
+          echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          
+          # Flags C/C++
+          echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          
+          # Flags Linker (Pour corriger "avcodec not found")
+          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$HB_PREFIX/lib:$HB_PREFIX/opt/ffmpeg@5/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          
+          # Flags Rust (Crucial pour le linker Rust)
+          echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
+          
+          # Flags Bindgen (Pour corriger "libyuv/convert.h not found")
+          VCPKG_INC="$GITHUB_WORKSPACE/vcpkg/installed/${{ matrix.vcpkg_triplet }}/include"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include -I$VCPKG_INC" >> $GITHUB_ENV
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2.12.0
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          targets: ${{ matrix.target }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: macos-latest
+
+      - name: Update Info.plist & Config
+        run: |
+          sed -i '' -e 's|<key>CFBundleName</key>.*<string>.*</string>|<key>CFBundleName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
+          sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
+          sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ env.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
+          sed -i -e 's|rs-ny.rustdesk.com|${{ env.server }}|' ./libs/hbb_common/src/config.rs
+          sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ env.key }}|' ./libs/hbb_common/src/config.rs
+
+      - name: Build RustDesk
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+        run: |
+          python3 build.py --flutter ${{ matrix.extra_args }}
+
+      - name: Package DMG
+        run: |
+          APP_PATH="flutter/build/macos/Build/Products/Release/RustDesk.app"
+          if [ "${{ env.appname }}" != "RustDesk" ]; then
+            mv "$APP_PATH" "flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
+            APP_PATH="flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
+          fi
+          
+          DMG_NAME="${{ env.filename }}-${{ matrix.arch }}.dmg"
+          
+          create-dmg --volname "${{ env.appname }}" "$DMG_NAME" "$APP_PATH"
+          
+          echo "DMG_OUTPUT=$DMG_NAME" >> $GITHUB_ENV
+
+      - name: Upload to Server
+        run: |
+          curl -X POST -F "file=@${{ env.DMG_OUTPUT }}" -F "uuid=${{ inputs.uuid }}" ${{ inputs.apiServer }}/api/save_custom_client
+
+      - name: Report Success
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success (${{ matrix.arch }})"}'
