@@ -45,9 +45,12 @@ env:
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # ICI C'EST LA CLE DU PROBLEME :
-  # On remplace le commit 2024 (qui n'a plus libmfx) par celui de 2023 (qui l'a encore).
+  # -----------------------------------------------------------------------
+  # C'EST LA LIGNE CRITIQUE (LIGNE 47)
+  # Ce commit date de Janvier 2023. C'est le SEUL qui contient 'libmfx'.
+  # Si tu as "46055..." ici, CA NE MARCHERA PAS.
   VCPKG_COMMIT_ID: "5e5d0e1cd7785623065e77eff011afdeec1a3574"
+  # -----------------------------------------------------------------------
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
 
@@ -99,7 +102,7 @@ jobs:
         run: |
           # Suppression des fichiers manifestes pour forcer le mode classique
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force
-          # Maintenant que le commit ID est bon (2023), on peut installer libmfx sans erreur
+          # AVEC LE COMMIT 2023 (5e5d...), libmfx EST DISPONIBLE.
           & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 libmfx --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust and Flutter
@@ -116,7 +119,7 @@ jobs:
 
       - name: Build rustdesk
         shell: pwsh
-        # On aide le linker à trouver la libmfx qu'on vient d'installer
+        # On force Rust à regarder dans le dossier vcpkg pour trouver libmfx.lib
         env:
           VCPKG_ROOT: "C:\\vcpkg"
           RUSTFLAGS: "-C target-feature=+crt-static -L native=C:/vcpkg/installed/x64-windows-static/lib"
