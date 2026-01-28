@@ -41,16 +41,13 @@ on:
         type: string
 
 env:
-  # VERSIONS STRICTEMENT IDENTIQUES AU FICHIER OFFICIEL QUI FONCTIONNE
   SCITER_RUST_VERSION: "1.75" 
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit VCPKG de Juillet 2024 (Celui du fichier officiel)
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
-  # Important pour le cache GitHub
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
@@ -73,10 +70,6 @@ jobs:
     name: Build Windows
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
-    env:
-      STATUS_URL: ${{ inputs.apiServer }}/api/updategh
-    
-    # Stratégie matrice identique au fichier officiel
     strategy:
       fail-fast: false
       matrix:
@@ -102,7 +95,6 @@ jobs:
       - name: Install Build Tools
         run: choco install -y nasm yasm ninja imagemagick.app --no-progress
 
-      # FIX FLUTTER GPU (Issu du fichier d'origine)
       - name: fix flutter_gpu_texture_renderer
         shell: bash
         run: |
@@ -120,7 +112,6 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # FIX FLUTTER ENGINE (Issu du fichier d'origine)
       - name: Replace engine with rustdesk custom flutter engine
         run: |
           flutter doctor -v
@@ -140,7 +131,6 @@ jobs:
         with:
           prefix-key: ${{ matrix.job.os }}
 
-      # VCPKG SETUP (Exactement comme le fichier qui marche)
       - name: Setup vcpkg with Github Actions binary cache
         uses: lukka/run-vcpkg@v11
         with:
@@ -148,22 +138,20 @@ jobs:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
 
-      # INSTALLATION DEPENDANCES (Mode Manifeste - Le secret de la réussite)
-      # On ne liste PAS les paquets manuellement. On laisse vcpkg lire le vcpkg.json du repo.
       - name: Install vcpkg dependencies
+        shell: pwsh
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          $env:VCPKG_ROOT\vcpkg install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$env:VCPKG_ROOT\installed"
+          # CORRECTION SYNTAXE POWERSHELL ICI
+          & "$env:VCPKG_ROOT\vcpkg" install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Build rustdesk
         shell: pwsh
         env:
           VCPKG_ROOT: "C:\\vcpkg"
-          # On garde RUSTFLAGS minimaliste comme dans le fichier original
           RUSTFLAGS: "-C target-feature=+crt-static" 
         run: |
-          # Commande de build exacte du fichier d'origine
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) { exit 1 }
