@@ -1,4 +1,4 @@
-name: Custom macOS Client Generator (Universal Matrix)
+name: Custom macOS Client Generator (Universal Fix)
 run-name: Build macOS ${{ inputs.appname }} (${{ inputs.version }})
 
 on:
@@ -53,8 +53,9 @@ env:
   FLUTTER_VERSION: "3.24.5"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
-  STATUS_URL: ${{ inputs.apiServer }}/api/updategh
-  # On cible une version assez basse pour la compatibilité
+  # CORRECTION URL: On retire le /api en dur car inputs.apiServer le contient déjà
+  STATUS_URL: ${{ inputs.apiServer }}/updategh
+  # On garde une cible basse pour la compatibilité binaire
   MACOSX_DEPLOYMENT_TARGET: "10.15"
 
 jobs:
@@ -72,12 +73,13 @@ jobs:
       matrix:
         include:
           # --- JOB INTEL (x86_64) ---
-          - os: macos-13
+          # CORRECTION: Passage à macos-15 car macos-13 est "retired"
+          - os: macos-15
             arch: x86_64
             arch-name: "Intel (x86_64)"
             target: x86_64-apple-darwin
             vcpkg-triplet: x64-osx
-            # On active hwcodec si possible, sinon retirer les flags ici
+            # Désactivation temporaire de hwcodec sur Intel si instable, sinon laissez-le
             build-args: "--hwcodec --screencapturekit"
 
           # --- JOB APPLE SILICON (ARM64) ---
@@ -123,7 +125,7 @@ jobs:
           sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
 
-      - name: Download Bridge
+      - name: Restore Bridge
         uses: actions/download-artifact@master
         with:
           name: bridge-artifact
@@ -134,7 +136,7 @@ jobs:
           brew update
           brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config git wget
           
-          # Détection dynamique du dossier Brew (Intel=/usr/local, ARM=/opt/homebrew)
+          # Détection dynamique du dossier Brew
           HB_PREFIX=$(brew --prefix)
           echo "Homebrew detected at: $HB_PREFIX"
           
@@ -142,40 +144,34 @@ jobs:
           echo "HB_PREFIX=$HB_PREFIX" >> $GITHUB_ENV
           echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          
+          # Configuration Compilation C/C++ pour que Rust trouve FFmpeg
+          echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$HB_PREFIX/lib:$HB_PREFIX/opt/ffmpeg@5/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
 
-      - name: Install & Bootstrap VCPKG (Fix Headers)
+      - name: Install & Fix VCPKG Headers (CRITIQUE)
         run: |
           cd vcpkg
           ./bootstrap-vcpkg.sh
           
-          # Installation explicite des libs pour que les headers soient présents
+          # Installation explicite pour s'assurer que les headers sont là AVANT le build
           echo "Installing dependencies for ${{ matrix.vcpkg-triplet }}..."
           ./vcpkg install libyuv libvpx aom --triplet=${{ matrix.vcpkg-triplet }}
           
           # Construction des chemins d'inclusion
           V_INC="$GITHUB_WORKSPACE/vcpkg/installed/${{ matrix.vcpkg-triplet }}/include"
-          HB_INC="$HB_PREFIX/opt/ffmpeg@5/include"
-          HB_LIB="$HB_PREFIX/opt/ffmpeg@5/lib"
+          HB_INC="$(brew --prefix)/opt/ffmpeg@5/include"
           
-          # INJECTION MASSIVE DES CHEMINS POUR LE COMPILATEUR
-          echo "V_INC=$V_INC" >> $GITHUB_ENV
-          
-          # Pour Bindgen (Rust -> C)
+          # INJECTION MASSIVE DES CHEMINS POUR BINDGEN (Le fix pour convert.h)
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
           
-          # Pour le compilateur C/C++ standard
+          # Injection pour le compilateur C standard (ceinture et bretelles)
           echo "CPATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           echo "C_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           echo "CPLUS_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
-          echo "CFLAGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
-          
-          # Pour le Linker
-          echo "LDFLAGS=-L$HB_LIB" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$HB_LIB" >> $GITHUB_ENV
-          
-          # Pour Rust Linker
-          echo "RUSTFLAGS=-L native=$HB_LIB" >> $GITHUB_ENV
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
@@ -194,7 +190,7 @@ jobs:
         with:
           prefix-key: macos-${{ matrix.arch }}
 
-      - name: Patch Flutter Info.plist
+      - name: Patch Info.plist
         run: |
           sed -i '' -e 's|<key>CFBundleName</key>.*<string>.*</string>|<key>CFBundleName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
           sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
@@ -202,7 +198,7 @@ jobs:
 
       - name: Build Application (Python)
         run: |
-          # Lancement du build avec les arguments de la matrice
+          # Lancement du build
           python3 build.py --flutter ${{ matrix.build-args }}
 
       - name: Package DMG
@@ -210,12 +206,10 @@ jobs:
           APP_SRC="flutter/build/macos/Build/Products/Release/RustDesk.app"
           APP_DEST="flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
           
-          # Renommage
           if [ "${{ env.appname }}" != "RustDesk" ]; then
             mv "$APP_SRC" "$APP_DEST"
           fi
           
-          # Nom du fichier final avec l'architecture
           DMG_NAME="${{ inputs.filename }}-${{ matrix.arch }}.dmg"
           
           create-dmg --volname "${{ env.appname }}" "$DMG_NAME" "$APP_DEST"
