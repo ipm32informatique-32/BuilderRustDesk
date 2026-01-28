@@ -121,7 +121,7 @@ jobs:
       - name: Install dependencies (Brew)
         run: |
           brew update
-          # --- CORRECTION ICI : Utilisation de ffmpeg@5 au lieu de ffmpeg ---
+          # Force l'installation de ffmpeg@5 sur toutes les architectures
           brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config
           
           # Détection du préfixe Homebrew
@@ -131,21 +131,26 @@ jobs:
             HB_PREFIX="/usr/local"
           fi
           
-          # Configuration des chemins pour que le compilateur trouve FFmpeg@5 et LLVM
-          # Notez l'ajout de "opt/ffmpeg@5" dans les chemins
+          # 1. Configuration des binaires
           echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
+          
+          # 2. Configuration pour pkg-config (utilisé par les scripts de build Rust)
           echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           
-          # Flags pour le compilateur C/C++ pointant vers ffmpeg@5
+          # 3. Flags pour le compilateur C/C++ (headers)
           echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
-          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
           
-          # Flags pour Bindgen
+          # 4. Flags pour le Linker C (librairies)
+          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$HB_PREFIX/lib:$HB_PREFIX/opt/ffmpeg@5/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          
+          # 5. Flags pour Bindgen (génération des bindings Rust)
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           
-          echo "CPATH=$HB_PREFIX/include:$CPATH" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$HB_PREFIX/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          # 6. CRUCIAL : Flags pour le compilateur RUST (pour qu'il trouve les .a/.dylib)
+          # Sans ça, on obtient "could not find native static library"
+          echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
