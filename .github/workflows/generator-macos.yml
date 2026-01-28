@@ -41,14 +41,22 @@ on:
         type: string
 
 env:
+  # --- VERSIONS DU FICHIER QUI FONCTIONNE ---
   SCITER_RUST_VERSION: "1.75"
   RUST_VERSION: "1.75"
+  MAC_RUST_VERSION: "1.81" 
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  
+  # --- CLES DE SIGNATURE (A CONFIGURER DANS GITHUB SECRETS) ---
+  # Assurez-vous d'avoir ajouté MACOS_P12_BASE64 et MACOS_P12_PASSWORD dans les secrets du repo
+  MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
+  
+  # URL de statut vers VOTRE serveur API
   STATUS_URL: ${{ inputs.apiServer }}/api/updategh
 
 jobs:
@@ -58,19 +66,29 @@ jobs:
       version: ${{ fromJson(inputs.extras).version }}
 
   build-for-macos:
-    name: Build macOS
+    name: ${{ matrix.job.target }}
     needs: [generate-bridge]
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
+          # Intel (x64)
           - {
               target: x86_64-apple-darwin,
               os: macos-13,
+              extra-build-args: "",
               arch: x86_64,
               vcpkg-triplet: x64-osx,
             }
+          # Apple Silicon (M1/M2) - Utilise macos-14
+          # - {
+          #     target: aarch64-apple-darwin,
+          #     os: macos-14,
+          #     extra-build-args: "--screencapturekit",
+          #     arch: aarch64,
+          #     vcpkg-triplet: arm64-osx,
+          #   }
 
     steps:
       - name: Report Status 0%
@@ -92,17 +110,38 @@ jobs:
           ref: ${{ env.VERSION == 'master' && 'master' || format('refs/tags/{0}', env.VERSION) }}
           submodules: recursive
 
+      # --- ETAPE CRUCIALE : ADAPTATION DES INPUTS ---
+      # C'est ici qu'on transforme les inputs de votre API pour que le script "qui fonctionne"
+      # puisse les lire comme s'ils venaient du ZIP.
+      - name: Setup Environment Variables from Inputs
+        run: |
+          echo "appname=${{ inputs.appname }}" >> $GITHUB_ENV
+          echo "server=${{ inputs.server }}" >> $GITHUB_ENV
+          echo "key=${{ inputs.key }}" >> $GITHUB_ENV
+          echo "apiServer=${{ inputs.apiServer }}" >> $GITHUB_ENV
+          echo "uuid=${{ inputs.uuid }}" >> $GITHUB_ENV
+          echo "filename=${{ inputs.filename }}" >> $GITHUB_ENV
+          echo "urlLink=${{ fromJson(inputs.extras).urlLink }}" >> $GITHUB_ENV
+          echo "downloadLink=${{ fromJson(inputs.extras).downloadLink }}" >> $GITHUB_ENV
+          
+          # Gestion des liens d'icones (supprime les guillemets superflus si présents)
+          echo "iconlink_url=${{ inputs.iconlink }}" >> $GITHUB_ENV
+          
+          # Ecriture de la configuration personnalisée JSON
+          echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
+
       - name: Restore bridge files
         uses: actions/download-artifact@master
         with:
           name: bridge-artifact
           path: ./
 
-      - name: Install Build Tools (Brew)
+      - name: Install dependencies (Brew)
         run: |
           brew update
-          brew install imagemagick create-dmg nasm yasm cmake ninja wget
-          xcode-select --install || true
+          brew install imagemagick create-dmg nasm yasm cmake ninja wget potrace
+          # pkg-config fallback
+          if ! command -v pkg-config &>/dev/null; then brew install pkg-config; fi
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v1
@@ -118,7 +157,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          toolchain: ${{ env.MAC_RUST_VERSION }}
           targets: ${{ matrix.job.target }}
           components: "rustfmt"
 
@@ -126,90 +165,62 @@ jobs:
         with:
           prefix-key: ${{ matrix.job.os }}
 
-      # --- GESTION DES CONFIGURATIONS PERSONNALISÉES ---
-      - name: Download and Apply Custom Config
+      # --- LOGIQUE DE RENOMMAGE (Issue du fichier qui fonctionne) ---
+      - name: Update macOS Info.plist and settings
+        continue-on-error: false
+        shell: bash
         run: |
-          # 1. Ecriture de la config custom
-          echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
+          # Backup
+          cp ./flutter/macos/Runner/Info.plist ./flutter/macos/Runner/Info.plist.bak
           
-          # 2. Gestion de l'icône personnalisée (Spécifique macOS)
-          if [ "${{ inputs.iconlink }}" != "false" ]; then
-            echo "Downloading Custom Icon..."
-            wget -O custom_icon.png "${{ inputs.iconlink }}"
-            
-            # Création dossier icônes
-            mkdir rustdesk.iconset
-            
-            # Redimensionnement pour créer les tailles standards macOS
-            sips -z 16 16     custom_icon.png --out rustdesk.iconset/icon_16x16.png
-            sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_16x16@2x.png
-            sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_32x32.png
-            sips -z 64 64     custom_icon.png --out rustdesk.iconset/icon_32x32@2x.png
-            sips -z 128 128   custom_icon.png --out rustdesk.iconset/icon_128x128.png
-            sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_128x128@2x.png
-            sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_256x256.png
-            sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_256x256@2x.png
-            sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_512x512.png
-            
-            # Conversion en .icns
-            iconutil -c icns rustdesk.iconset
-            
-            # Remplacement de l'icône par défaut dans le code source Flutter (avant build)
-            cp rustdesk.icns flutter/macos/Runner/Assets.xcassets/AppIcon.appiconset/
-            # Pour la version Sciter (si utilisée)
-            cp rustdesk.icns res/mac.icns || true
-          fi
+          # Update Info.plist
+          sed -i '' -e 's|<key>CFBundleName</key>.*<string>.*</string>|<key>CFBundleName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
+          sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
+          sed -i '' -e 's|<key>CFBundleIdentifier</key>.*<string>.*</string>|<key>CFBundleIdentifier</key>\n\t<string>com.${{ env.appname }}.app</string>|' ./flutter/macos/Runner/Info.plist
+          
+          # Update AppInfo.xcconfig
+          sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ env.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
+          sed -i '' -e 's|PRODUCT_BUNDLE_IDENTIFIER = .*|PRODUCT_BUNDLE_IDENTIFIER = com.${{ env.appname }}.app|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
+          
+          # Renommage Cargo
+          sed -i -e 's|Purslane Ltd.|${{ env.appname }}|' ./Cargo.toml
+          
+          # Renommage fichiers langue
+          find ./src/lang -name "*.rs" -exec sed -i '' -e 's|RustDesk|${{ env.appname }}|' {} \;
+          
+          # Injection Serveur et Key dans le code source
+          sed -i -e 's|rs-ny.rustdesk.com|${{ env.server }}|' ./libs/hbb_common/src/config.rs
+          sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ env.key }}|' ./libs/hbb_common/src/config.rs
+          sed -i -e 's|https://admin.rustdesk.com|${{ env.apiServer }}|' ./src/common.rs
 
-      - name: Build RustDesk (Release)
+      # --- GESTION ICONE (Simplifiée pour votre API) ---
+      - name: Download and Process Icon
+        if: ${{ inputs.iconlink != 'false' }}
+        run: |
+           # Téléchargement direct depuis l'URL fournie par inputs
+           wget -O custom_icon.png "${{ inputs.iconlink }}"
+           
+           # Création dossier icônes
+           mkdir rustdesk.iconset
+           sips -z 16 16     custom_icon.png --out rustdesk.iconset/icon_16x16.png
+           sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_16x16@2x.png
+           sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_32x32.png
+           sips -z 64 64     custom_icon.png --out rustdesk.iconset/icon_32x32@2x.png
+           sips -z 128 128   custom_icon.png --out rustdesk.iconset/icon_128x128.png
+           sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_128x128@2x.png
+           sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_256x256.png
+           sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_256x256@2x.png
+           sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_512x512.png
+           
+           # Conversion ICNS
+           iconutil -c icns rustdesk.iconset
+           cp rustdesk.icns flutter/macos/Runner/Assets.xcassets/AppIcon.appiconset/
+
+      - name: Build RustDesk
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          # Installation dépendances VCPKG si nécessaire (souvent géré par build.py)
-          python3 build.py --hwcodec --flutter --release
+          python3 build.py --hwcodec --flutter --release ${{ matrix.job.extra-build-args }}
 
-      - name: Package DMG
-        run: |
-          # Le build génère une .app dans flutter/build/macos/Build/Products/Release/
-          APP_PATH="flutter/build/macos/Build/Products/Release/rustdesk.app"
-          
-          # Renommage si appname est différent
-          if [ "${{ inputs.appname }}" != "rustdesk" ]; then
-            mv "$APP_PATH" "flutter/build/macos/Build/Products/Release/${{ inputs.appname }}.app"
-            APP_PATH="flutter/build/macos/Build/Products/Release/${{ inputs.appname }}.app"
-          fi
-          
-          # Création du DMG
-          create-dmg \
-            --volname "${{ inputs.appname }}" \
-            --volicon "rustdesk.icns" \
-            --window-pos 200 120 \
-            --window-size 800 400 \
-            --icon-size 100 \
-            --icon "${{ inputs.appname }}.app" 200 190 \
-            --hide-extension "${{ inputs.appname }}.app" \
-            --app-drop-link 600 185 \
-            "${{ inputs.filename }}.dmg" \
-            "$APP_PATH"
-
-      - name: Report Status 100% (Uploading)
-        uses: fjogeleit/http-request-action@v1
-        continue-on-error: true
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Uploading macOS Client..."}'
-
-      - name: Upload to Server
-        run: |
-          curl -X POST -F "file=@${{ inputs.filename }}.dmg" -F "uuid=${{ inputs.uuid }}" ${{ inputs.apiServer }}/api/save_custom_client
-
-      - name: Report Status Success
-        uses: fjogeleit/http-request-action@v1
-        continue-on-error: true
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
+      - name: Package
