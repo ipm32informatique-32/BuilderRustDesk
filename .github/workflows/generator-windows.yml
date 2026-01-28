@@ -98,8 +98,8 @@ jobs:
         run: |
           # Suppression des fichiers manifestes pour forcer le mode classique
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force
-          # CORRECTION : On a retiré 'vpl' qui n'existe pas, mais on garde 'intel-media-sdk'
-          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 intel-media-sdk --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          # CORRECTION FINALE : Utilisation de 'libmfx' (nom historique/compatible) au lieu de vpl/intel-media-sdk
+          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 libmfx --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust and Flutter
         uses: dtolnay/rust-toolchain@v1
@@ -115,7 +115,7 @@ jobs:
 
       - name: Build rustdesk
         shell: pwsh
-        # CORRECTION : On force le linker à trouver la libmfx installée par intel-media-sdk
+        # Configuration pour forcer Rust à trouver libmfx
         env:
           VCPKG_ROOT: "C:\\vcpkg"
           RUSTFLAGS: "-C target-feature=+crt-static -L native=C:/vcpkg/installed/x64-windows-static/lib"
