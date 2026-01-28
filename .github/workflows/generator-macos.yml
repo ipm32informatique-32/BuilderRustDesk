@@ -4,77 +4,55 @@ on:
   workflow_dispatch:
     inputs:
       server:
-        description: 'Rendezvous Server'
         required: true
-        default: ''
         type: string
       key:
-        description: 'Public Key'
         required: true
-        default: ''
         type: string
       apiServer:
-        description: 'API Server'
         required: true
-        default: ''
         type: string
       custom:
-        description: "Custom JSON"
         required: true
         default: ''
         type: string
       uuid:
-        description: "uuid of request"
         required: true
-        default: ''
         type: string
       iconlink:
-        description: "icon link"
         required: false
         default: 'false'
         type: string
       logolink:
-        description: "logo link"
         required: false
         default: 'false'
         type: string
       appname:
-        description: "app name"
         required: true
         default: 'rustdesk'
         type: string
       filename:
-        description: "Filename"
         required: true
         default: 'rustdesk'
         type: string
       extras:
-        description: "extra inputs in json"
         required: true
         default: '{}'
         type: string
 
 env:
+  # Versions stables pour macOS
   SCITER_RUST_VERSION: "1.75"
   RUST_VERSION: "1.75"
-  MAC_RUST_VERSION: "1.81" 
-  CARGO_NDK_VERSION: "3.1.2"
-  SCITER_ARMV7_CMAKE_VERSION: "3.29.7"
-  SCITER_NASM_DEBVERSION: "2.14-1"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  ANDROID_FLUTTER_VERSION: "3.24.5"
-  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
-  FLUTTER_ELINUX_VERSION: "3.16.9"
-  TAG_NAME: "${{ inputs.upload-tag }}"
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
+  # Même commit VCPKG que pour Windows (Juillet 2024), très stable
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
-  NDK_VERSION: "r27c"
-  ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
-  MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   UPLOAD_ARTIFACT: 'true'
-  SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # URL de statut
+  STATUS_URL: ${{ inputs.apiServer }}/api/updategh
 
 jobs:
   generate-bridge:
@@ -82,80 +60,44 @@ jobs:
     with:
       version: ${{ fromJson(inputs.extras).version }}
 
+  # PAS DE JOB RustDeskTempTopMostWindow ICI (C'est pour Windows uniquement)
+
   build-for-macos:
-    name: ${{ matrix.job.target }}
-    runs-on: ${{ matrix.job.os }}
+    name: Build macOS
     needs: [generate-bridge]
+    # Utilisation de la matrice pour choisir le bon OS selon l'architecture cible
+    runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
+          # Build Intel (x64) sur macOS 13 (Ventura)
           - {
               target: x86_64-apple-darwin,
               os: macos-13,
-              extra-build-args: "",
               arch: x86_64,
               vcpkg-triplet: x64-osx,
             }
-          - {
-              target: aarch64-apple-darwin,
-              os: macos-latest,
-              extra-build-args: "--screencapturekit",
-              arch: aarch64,
-              vcpkg-triplet: arm64-osx,
-            }
-    env:
-      STATUS_URL: ${{ fromJson(inputs.extras).rdgen == 'true' && format('{0}/updategh', secrets.GENURL) || format('{0}/api/updategh', inputs.apiServer) }}
+          # Build Apple Silicon (M1/M2) sur macOS 14 (Sonoma)
+          # - {
+          #     target: aarch64-apple-darwin,
+          #     os: macos-14,
+          #     arch: aarch64,
+          #     vcpkg-triplet: arm64-osx,
+          #   }
 
     steps:
-      - name: install python deps
-        run: |
-          pip3 install requests pyzipper
-          
-      - name: Download, Decrypt, and Mask Secrets
-        shell: python
-        run: |
-          import requests
-          import pyzipper
-          import io
-          import os
-          import json
-
-          # On utilise directement les inputs ici pour plus de fiabilité
-          zip_url_json = ${{ inputs.zip_url }}
-          r = requests.get(f"{zip_url_json['url']}/get_zip?filename={zip_url_json['file']}")
-          r.raise_for_status()
-          
-          try:
-            with pyzipper.AESZipFile(io.BytesIO(r.content)) as zf:
-              zf.setpassword('${{ secrets.ZIP_PASSWORD }}'.encode())
-              with zf.open('secrets.json') as f:
-                secrets = json.load(f)
-          except Exception as e:
-            print(f"Error: Could not decrypt ZIP. Check if password matches. {e}")
-            exit(1)
-
-          with open(os.environ['GITHUB_ENV'], 'a') as env_file:
-            for key, value in secrets.items():
-              print(f"::add-mask::{value}")
-              env_file.write(f"{key}={value}\n")
-          
-          print("Secrets loaded into environment.")
-
-      - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v6
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      - name: Report Status
+      - name: Report Status 0%
         uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
         with:
           url: ${{ env.STATUS_URL }}
           method: 'POST'
           customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "5% complete"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting macOS Build..."}'
+
+      - name: install python deps
+        run: pip3 install requests pyzipper
 
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -164,221 +106,55 @@ jobs:
           ref: ${{ env.VERSION == 'master' && 'master' || format('refs/tags/{0}', env.VERSION) }}
           submodules: recursive
 
-      - name: Install dependencies
-        shell: bash
-        run: |
-          brew install imagemagick potrace nasm cmake gcc wget ninja
-          echo "$(brew --prefix imagemagick)/bin" >> $GITHUB_PATH
-
-      - name: Update macOS Info.plist and settings
-        continue-on-error: false
-        shell: bash
-        run: |
-          # Backup files
-          cp ./flutter/macos/Runner/Info.plist ./flutter/macos/Runner/Info.plist.bak
-          cp ./flutter/macos/Runner/Configs/AppInfo.xcconfig ./flutter/macos/Runner/Configs/AppInfo.xcconfig.bak
-          
-          # Update Info.plist
-          sed -i '' -e 's|<key>CFBundleName</key>.*<string>.*</string>|<key>CFBundleName</key>\n\t<string>${{ inputs.appname }}</string>|' ./flutter/macos/Runner/Info.plist
-          sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ inputs.appname }}</string>|' ./flutter/macos/Runner/Info.plist
-          sed -i '' -e 's|<key>CFBundleIdentifier</key>.*<string>.*</string>|<key>CFBundleIdentifier</key>\n\t<string>com.${{ inputs.appname }}.app</string>|' ./flutter/macos/Runner/Info.plist
-          
-          # Update AppInfo.xcconfig
-          sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ inputs.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
-          sed -i '' -e 's|PRODUCT_BUNDLE_IDENTIFIER = .*|PRODUCT_BUNDLE_IDENTIFIER = com.${{ inputs.appname }}.app|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
-          sed -i '' -e 's|Purslane Ltd.|${{ inputs.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
-
-          # Update Cargo.toml
-          sed -i -e 's|Purslane Ltd.|${{ inputs.appname }}|' ./Cargo.toml
-          sed -i -e 's|Purslane Ltd|${{ inputs.appname }}|' ./libs/portable/Cargo.toml
-          
-          # Update Xcode project settings
-          sed -i '' -e 's/PRODUCT_NAME = "RustDesk"/PRODUCT_NAME = "${{ inputs.appname }}"/' ./flutter/macos/Runner.xcodeproj/project.pbxproj
-          sed -i '' -e 's/PRODUCT_BUNDLE_IDENTIFIER = ".*"/PRODUCT_BUNDLE_IDENTIFIER = "com.${{ inputs.appname }}.app"/' ./flutter/macos/Runner.xcodeproj/project.pbxproj
-
-          # Update CMake settings
-          if [ -f "./flutter/macos/CMakeLists.txt" ]; then
-            sed -i '' -e 's/set(BINARY_NAME ".*")/set(BINARY_NAME "${{ inputs.appname }}")/' ./flutter/macos/CMakeLists.txt
-          fi
-
-          # Update Podfile
-          sed -i '' -e 's/target '"'"'Runner'"'"' do/target '"'"'Runner'"'"' do/' ./flutter/macos/Podfile
-
-          # Branding text replacements
-          sed -i '' -e 's|RustDesk|${{ inputs.appname }}|' ./src/lang/en.rs
-          sed -i '' -e 's|RustDesk|${{ inputs.appname }}|' ./src/lang/nl.rs
-            
-          # URLs and Servers
-          sed -i '' -e 's|https://rustdesk.com|${{ fromJson(inputs.extras).urlLink }}|' ./build.py
-          sed -i '' -e "s|launchUrl(Uri.parse('https://rustdesk.com'));|launchUrl(Uri.parse('${{ fromJson(inputs.extras).urlLink }}'));|" ./flutter/lib/common.dart
-          sed -i '' -e "s|launchUrlString('https://rustdesk.com');|launchUrlString('${{ fromJson(inputs.extras).urlLink }}');|" ./flutter/lib/desktop/pages/desktop_setting_page.dart
-          sed -i '' -e "s|launchUrlString('https://rustdesk.com/privacy.html')|launchUrlString('${{ fromJson(inputs.extras).urlLink }}/privacy.html')|" ./flutter/lib/desktop/pages/desktop_setting_page.dart
-          sed -i '' -e "s|const url = 'https://rustdesk.com/';|const url = '${{ fromJson(inputs.extras).urlLink }}';|" ./flutter/lib/mobile/pages/settings_page.dart
-          sed -i '' -e "s|launchUrlString('https://rustdesk.com/privacy.html')|launchUrlString('${{ fromJson(inputs.extras).urlLink }}/privacy.html')|" ./flutter/lib/mobile/pages/settings_page.dart
-          sed -i '' -e "s|https://rustdesk.com/privacy.html|${{ fromJson(inputs.extras).urlLink }}/privacy.html|" ./flutter/lib/desktop/pages/install_page.dart
-
-          # Server Config
-          sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
-          sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
-          sed -i -e 's|https://admin.rustdesk.com|${{ inputs.apiServer }}|' ./src/common.rs
-
-      - name: change download link to custom
-        if: fromJson(inputs.extras).downloadLink != 'https://rustdesk.com/download'
-        continue-on-error: true
-        shell: bash
-        run: |
-          sed -i -e 's|https://rustdesk.com/download|${{ fromJson(inputs.extras).downloadLink }}|' ./flutter/lib/desktop/pages/desktop_home_page.dart
-          sed -i -e 's|https://rustdesk.com/download|${{ fromJson(inputs.extras).downloadLink }}|' ./flutter/lib/mobile/pages/connection_page.dart
-          sed -i -e 's|https://rustdesk.com/download|${{ fromJson(inputs.extras).downloadLink }}|' ./src/ui/index.tis
-
-      - name: Report Status
-        uses: fjogeleit/http-request-action@v1
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
         with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "10% complete"}'
+          name: bridge-artifact
+          path: ./
+
+      # --- INSTALLATION DES OUTILS MAC (Brew au lieu de Choco) ---
+      - name: Install Build Tools (Brew)
+        run: |
+          brew update
+          brew install imagemagick create-dmg nasm yasm cmake ninja wget
+          # On s'assure que clang est dispo
+          xcode-select --install || true
+
+      - name: fix flutter_gpu_texture_renderer
+        run: |
+          sed -i '' -e 's|2ded7f146437a761ffe6981e2f742038f85ca68d|08a471bb8ceccdd50483c81cdfa8b81b07b14b87|' ./flutter/pubspec.lock
+          sed -i '' -e 's|2ded7f146437a761ffe6981e2f742038f85ca68d|08a471bb8ceccdd50483c81cdfa8b81b07b14b87|' ./flutter/pubspec.yaml
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: ${{ env.LLVM_VERSION }}
 
       - name: Install flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@v2.12.0
         with:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      - name: Patch flutter
-        continue-on-error: true
+      - name: Replace engine with rustdesk custom flutter engine
         run: |
-            cd $(dirname $(dirname $(which flutter)))
-            [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
-      
+          flutter doctor -v
+          flutter precache --macos
+          # Téléchargement moteur Mac (Note: URL différente de Windows)
+          # Note: RustDesk utilise souvent le moteur par défaut sur Mac ou un build spécifique.
+          # Si le build officiel n'a pas d'URL spécifique Mac ici, on saute l'écrasement ou on adapte l'URL.
+          # Pour l'instant, on laisse flutter standard sauf si une URL Mac existe.
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-            toolchain: ${{ env.MAC_RUST_VERSION }}
-            targets: ${{ matrix.job.target }}
-            components: "rustfmt"
-  
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          components: "rustfmt"
+
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ matrix.job.os }}
 
-      - name: Magick stuff for macOS (Icons)
-        if: ${{ inputs.iconlink != 'false' }}
-        continue-on-error: false
-        shell: bash
-        run: |
-          mkdir -p ./res
-          mkdir -p ./flutter/assets
-          mkdir -p ./flutter/macos/Runner/Assets.xcassets/AppIcon.appiconset
-          mkdir -p ./macos/Runner/Assets.xcassets/AppIcon.appiconset
-          mkdir -p ./rustdesk/data/flutter_assets/assets
-
-          curl -L -o ./res/icon.png "${{ fromJson(inputs.iconlink).url }}/get_png?filename=${{ fromJson(inputs.iconlink).file }}&uuid=${{ fromJson(inputs.iconlink).uuid }}"
-            
-          # Conversion standard
-          magick ./res/icon.png -resize 128x128 ./res/mac-icon.png
-          
-          # Generation AppIcon.icns manuelle
-          mkdir -p ./iconset.iconset
-          cp ./res/icon.png ./iconset.iconset/icon_512x512@2x.png
-          sips -z 16 16     ./res/icon.png --out ./iconset.iconset/icon_16x16.png
-          sips -z 32 32     ./res/icon.png --out ./iconset.iconset/icon_16x16@2x.png
-          sips -z 32 32     ./res/icon.png --out ./iconset.iconset/icon_32x32.png
-          sips -z 64 64     ./res/icon.png --out ./iconset.iconset/icon_32x32@2x.png
-          sips -z 128 128   ./res/icon.png --out ./iconset.iconset/icon_128x128.png
-          sips -z 256 256   ./res/icon.png --out ./iconset.iconset/icon_128x128@2x.png
-          sips -z 256 256   ./res/icon.png --out ./iconset.iconset/icon_256x256.png
-          sips -z 512 512   ./res/icon.png --out ./iconset.iconset/icon_256x256@2x.png
-          sips -z 512 512   ./res/icon.png --out ./iconset.iconset/icon_512x512.png
-          iconutil -c icns ./iconset.iconset -o ./flutter/macos/Runner/AppIcon.icns
-          rm -rf ./iconset.iconset
-
-          # Update Contents.json (important pour Xcode)
-          echo '{
-            "images" : [
-              { "size" : "16x16", "idiom" : "mac", "filename" : "icon_16x16.png", "scale" : "1x" },
-              { "size" : "16x16", "idiom" : "mac", "filename" : "icon_16x16@2x.png", "scale" : "2x" },
-              { "size" : "32x32", "idiom" : "mac", "filename" : "icon_32x32.png", "scale" : "1x" },
-              { "size" : "32x32", "idiom" : "mac", "filename" : "icon_32x32@2x.png", "scale" : "2x" },
-              { "size" : "128x128", "idiom" : "mac", "filename" : "icon_128x128.png", "scale" : "1x" },
-              { "size" : "128x128", "idiom" : "mac", "filename" : "icon_128x128@2x.png", "scale" : "2x" },
-              { "size" : "256x256", "idiom" : "mac", "filename" : "icon_256x256.png", "scale" : "1x" },
-              { "size" : "256x256", "idiom" : "mac", "filename" : "icon_256x256@2x.png", "scale" : "2x" },
-              { "size" : "512x512", "idiom" : "mac", "filename" : "icon_512x512.png", "scale" : "1x" },
-              { "size" : "512x512", "idiom" : "mac", "filename" : "icon_512x512@2x.png", "scale" : "2x" }
-            ],
-            "info" : { "version" : 1, "author" : "xcode" }
-          }' > flutter/macos/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json
-          
-          # Copy icons to Flutter assets and RustDesk assets
-          cp ./res/icon.png ./flutter/assets/icon.png
-          cp ./res/icon.png ./rustdesk/data/flutter_assets/assets/icon.png
-
-      - name: Report Status
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "50% complete"}'
-
-      # --- BUILD RUSTDESK ---
-      - name: Build rustdesk
-        run: |
-          if [ "${{ matrix.job.target }}" = "aarch64-apple-darwin" ]; then
-            MIN_MACOS_VERSION="12.3"
-            sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/" build.py
-            sed -i '' -e "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/" flutter/macos/Podfile
-          fi
-          sed -i '' -e "s/RustDesk.app/\"${{ inputs.appname }}.app\"/" build.py
-          ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
-
-      # --- CREATE DMG ---
-      - name: Create DMG
-        run: |
-          cd flutter/build/macos/Build/Products/Release
-          
-          if [ -d "RustDesk.app" ]; then
-            mv "RustDesk.app" "${{ inputs.appname }}.app"
-          fi
-          
-          create-dmg \
-            --volname "${{ inputs.appname }}" \
-            --window-pos 200 120 \
-            --window-size 800 400 \
-            --icon-size 100 \
-            --icon "${{ inputs.appname }}.app" 200 190 \
-            --hide-extension "${{ inputs.appname }}.app" \
-            --app-drop-link 600 185 \
-            "${{ inputs.filename }}.dmg" \
-            "${{ inputs.appname }}.app"
-            
-          mv "${{ inputs.filename }}.dmg" $GITHUB_WORKSPACE/
-
-      # --- UPLOAD ---
-      - name: Send file to API
-        shell: bash
-        run: |
-          curl -i -X POST \
-            -H "Content-Type: multipart/form-data" \
-            -H "Authorization: Bearer ${{ fromJson(inputs.extras).token }}" \
-            -F "file=@$GITHUB_WORKSPACE/${{ inputs.filename }}.dmg" \
-            -F "uuid=${{ inputs.uuid }}" \
-            ${{ inputs.apiServer }}/api/save_custom_client
-
-      - name: Report Success
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
-
-      - name: Report Failure
-        if: failure()
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: ${{ env.STATUS_URL }}
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Generation failed"}'
+      # --- GESTION DES ICONES MAC ---
+      - name: Process
