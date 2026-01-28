@@ -125,21 +125,29 @@ jobs:
           # Installation des outils et de ffmpeg requis pour hwcodec
           brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg libsodium pkg-config
           
-          # Configuration agressive des chemins pour que le compilateur (clang/cc) trouve les includes Homebrew
-          echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> $GITHUB_ENV
-          echo 'export PKG_CONFIG_PATH="/opt/homebrew/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"' >> $GITHUB_ENV
+          # Détection du préfixe Homebrew (dynamique selon l'architecture)
+          if [ -d "/opt/homebrew" ]; then
+            HB_PREFIX="/opt/homebrew"
+          else
+            HB_PREFIX="/usr/local"
+          fi
           
-          # Flags pour le compilateur C/C++ (Indispensable pour l'erreur libavutil/attributes.h)
-          echo "CFLAGS=-I/opt/homebrew/include -I/opt/homebrew/opt/ffmpeg/include" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I/opt/homebrew/include -I/opt/homebrew/opt/ffmpeg/include" >> $GITHUB_ENV
-          echo "LDFLAGS=-L/opt/homebrew/lib -L/opt/homebrew/opt/ffmpeg/lib" >> $GITHUB_ENV
+          # Configuration des chemins pour que le compilateur trouve FFmpeg et LLVM
+          echo "PATH=$HB_PREFIX/opt/llvm/bin:$PATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          
+          # Flags pour le compilateur C/C++ (C'est ici que la correction opère)
+          # On inclut explicitement les dossiers headers de ffmpeg
+          echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg/include" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg/lib" >> $GITHUB_ENV
           
           # Flags pour Bindgen (utilisé par les crates Rust qui parlent au C)
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-I/opt/homebrew/include -I/opt/homebrew/opt/ffmpeg/include" >> $GITHUB_ENV
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg/include" >> $GITHUB_ENV
           
-          # Variables de repli
-          echo 'export CPATH="/opt/homebrew/include:$CPATH"' >> $GITHUB_ENV
-          echo 'export LIBRARY_PATH="/opt/homebrew/lib:$LIBRARY_PATH"' >> $GITHUB_ENV
+          # Variables de repli pour certains compilateurs
+          echo "CPATH=$HB_PREFIX/include:$CPATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$HB_PREFIX/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
