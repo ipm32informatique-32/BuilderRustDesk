@@ -41,12 +41,14 @@ on:
         type: string
 
 env:
+  # Rust 1.78 minimum
   SCITER_RUST_VERSION: "1.78"
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
+  # VCPKG récent (Jan 2025)
   VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
-  # VERSION: RETIRÉ D'ICI POUR ÉVITER LE CRASH AU DÉMARRAGE
+  VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
 
 jobs:
@@ -82,8 +84,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: rustdesk/rustdesk
-          # Calcul de la version directement ici pour être sûr
-          ref: ${{ fromJson(inputs.extras).version == 'master' && 'master' || format('refs/tags/{0}', fromJson(inputs.extras).version) }}
+          ref: ${{ env.VERSION == 'master' && 'master' || format('refs/tags/{0}', env.VERSION) }}
           submodules: recursive
 
       - name: Set API Status URL
@@ -136,16 +137,26 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
-      # --- INSTALLATION DEPENDANCES (CLEAN + NO HWCODEC LIBS) ---
+      # --- INSTALLATION DEPENDANCES (AVEC HACK POUR HWCODEC) ---
       - name: Install Dependencies
         shell: pwsh
         run: |
-          # 1. Suppression brutale de vcpkg.json
-          Write-Host "Recherche et suppression de vcpkg.json..."
+          # 1. Nettoyage
+          Write-Host "Nettoyage du manifeste..."
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # 2. Installation SANS libmfx pour éviter l'erreur
-          & "$env:VCPKG_ROOT\vcpkg" install --classic ffmpeg opus libvpx libyuv aom protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          # 2. Installation (Avec libvpl au lieu de libmfx)
+          Write-Host "Installation des dependances..."
+          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 libvpl --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          
+          # 3. LE HACK : On clone libvpl.lib en libmfx.lib pour que RustDesk le trouve !
+          $libPath = "$env:VCPKG_ROOT\installed\x64-windows-static\lib"
+          if (Test-Path "$libPath\libvpl.lib") {
+             Copy-Item "$libPath\libvpl.lib" "$libPath\libmfx.lib" -Force
+             Write-Host "SUCCÈS: libvpl.lib copié en libmfx.lib (HWCODEC activé)"
+          } else {
+             Write-Warning "ECHEC: libvpl.lib introuvable."
+          }
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
@@ -160,12 +171,12 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- COMPILATION (FIXÉE : SANS HWCODEC) ---
+      # --- COMPILATION (HWCODEC ACTIVÉ + SYNTAXE CORRIGÉE) ---
       - name: Build rustdesk
         shell: pwsh
         run: |
-          # COMMANDE CORRIGÉE : Pas de --hwcodec pour éviter le plantage
-          python3 .\build.py --portable --flutter --vram --skip-portable-pack
+          # COMMANDE FINALE : HWCODEC ACTIVÉ
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) {
              Write-Error "CRITICAL: rustdesk.exe was not created."
@@ -180,10 +191,196 @@ jobs:
           Remove-Item -Path usbmmidd_v2\Win32, usbmmidd_v2\deviceinstaller64.exe, usbmmidd_v2\deviceinstaller.exe, usbmmidd_v2\usbmmidd.bat -Recurse -ErrorAction SilentlyContinue
           mv -Force .\usbmmidd_v2 ./rustdesk
 
-          try {
-            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
-            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
+          # GESTION IMPRIMANTE SIMPLIFIÉE (Plus de try/catch complexe)
+          Write-Host "Téléchargement des drivers d'imprimante..."
+          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip -ErrorAction SilentlyContinue
+          Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip -ErrorAction SilentlyContinue
+          
+          if (Test-Path "rustdesk_printer_driver_v4-1.4.zip") {
+            Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath . -Force -ErrorAction SilentlyContinue
+          }
+          
+          if (!(Test-Path "./rustdesk/drivers/RustDeskPrinterDriver")) { 
+             New-Item -ItemType Directory -Path "./rustdesk/drivers/RustDeskPrinterDriver" -Force 
+          }
+          
+          if (Test-Path ".\rustdesk_printer_driver_v4-1.4") {
+             Copy-Item -Path ".\rustdesk_printer_driver_v4-1.4\*" -Destination "./rustdesk/drivers/RustDeskPrinterDriver/" -Recurse -Force
+          }
+          
+          if (Test-Path "printer_driver_adapter.zip") {
+            Expand-Archive printer_driver_adapter.zip -DestinationPath . -Force -ErrorAction SilentlyContinue
+          }
+
+          if (Test-Path ".\printer_driver_adapter.dll") {
+             Move-Item -Path ".\printer_driver_adapter.dll" -Destination "./rustdesk/" -Force
+          }
+
+      - name: icon stuff (post-build)
+        if: ${{ inputs.iconlink != 'false' }}
+        continue-on-error: true
+        run: |
+          mv ./rustdesk/data/flutter_assets/assets/icon.svg ./rustdesk/data/flutter_assets/assets/icon.svg.bak
+          magick ./res/icon.png ./rustdesk/data/flutter_assets/assets/icon.svg
+
+      - name: logo stuff (post-build)
+        if: ${{ inputs.logolink != 'false' }}
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ fromJson(inputs.logolink).url }}/get_png?filename=${{ fromJson(inputs.logolink).file }}&uuid=${{ fromJson(inputs.logolink).uuid }}" -OutFile ./rustdesk/data/flutter_assets/assets/logo.png
+
+      - name: find Runner.res
+        continue-on-error: true
+        shell: bash
+        run: |
+          runner_res=$(find . -name "Runner.res");
+          if [ "$runner_res" != "" ]; then
+            cp $runner_res ./libs/portable/Runner.res;
+          fi
+
+      - name: Download RustDeskTempTopMostWindow artifacts
+        uses: actions/download-artifact@v4
+        if: env.UPLOAD_ARTIFACT == 'true'
+        with:
+          name: topmostwindow-artifacts
+          path: "./rustdesk"
+
+      - name: Report Status
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "70% complete (Packing)"}'
+
+      # --- PACKAGING ---
+      - name: zip dlls
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Compress-Archive -Path ./rustdesk/*.dll, ./rustdesk/*.exe -DestinationPath ./rustdesk/unsigned_files.zip -CompressionLevel Fastest
+
+      - name: sign dlls
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ ! -z "${{ secrets.SIGN_BASE_URL }}" ] && [ ! -z "${{ secrets.SIGN_API_KEY }}" ]; then
+            curl -X POST -F "file=@./rustdesk/unsigned_files.zip" \
+              -H "X-API-KEY: ${{ secrets.SIGN_API_KEY }}" \
+              -m 900 \
+              "${{ secrets.SIGN_BASE_URL }}/sign/" -o ./rustdesk/signed_files.zip
+          else
+            cp ./rustdesk/unsigned_files.zip ./rustdesk/signed_files.zip
+          fi
+
+      - name: unzip dlls
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Expand-Archive -Path ./rustdesk/signed_files.zip -DestinationPath ./rustdesk/ -Force
+          Remove-Item ./rustdesk/unsigned_files.zip
+          Remove-Item ./rustdesk/signed_files.zip
+
+      - name: Create custom.txt file
+        shell: bash
+        run: |
+          echo -n "${{ inputs.custom }}" | cat > ./rustdesk/custom_.txt
+
+      - name: Build self-extracted executable
+        shell: bash
+        if: env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          mv "./rustdesk/rustdesk.exe" "./rustdesk/${{ inputs.appname }}.exe" || echo "rustdesk.exe"
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/${{ inputs.appname }}.exe"
+          popd
+          mkdir -p ./SignOutput
+          mv ./target/release/rustdesk-portable-packer.exe "./SignOutput/rustdesk.exe"
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build msi
+        continue-on-error: true
+        if: env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          $myappname = "${{ inputs.appname }}" -replace '\s','_'
+          cp "rustdesk/${{ inputs.appname }}.exe" "rustdesk/${myappname}.exe" -ErrorAction SilentlyContinue
+          pushd ./res/msi
+          python preprocess.py --app-name "$myappname" --arp -d ../../rustdesk
+          nuget restore msi.sln
+          msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
+          cp ./Package/bin/x64/Release/en-us/Package.msi ../../SignOutput/rustdesk-latest.msi
+          mv ./Package/bin/x64/Release/en-us/Package.msi ../../SignOutput/rustdesk.msi
+
+      - name: zip exe and msi
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Compress-Archive -Path ./SignOutput/*.exe, ./SignOutput/*.msi -DestinationPath ./SignOutput/unsigned_files.zip -CompressionLevel Fastest
+
+      - name: sign exe and msi
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ ! -z "${{ secrets.SIGN_BASE_URL }}" ] && [ ! -z "${{ secrets.SIGN_API_KEY }}" ]; then
+            curl -X POST -F "file=@./SignOutput/unsigned_files.zip" \
+              -H "X-API-KEY: ${{ secrets.SIGN_API_KEY }}" \
+              -m 900 \
+              "${{ secrets.SIGN_BASE_URL }}/sign/" -o ./SignOutput/signed_files.zip
+          else
+            cp ./SignOutput/unsigned_files.zip ./SignOutput/signed_files.zip
+          fi
+
+      - name: unzip exe and msi
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Expand-Archive -Path ./SignOutput/signed_files.zip -DestinationPath ./SignOutput/ -Force
+          Remove-Item ./SignOutput/unsigned_files.zip
+          Remove-Item ./SignOutput/signed_files.zip
+
+      - name: rename rustdesk.exe to filename.exe
+        run: |
+          mv ./SignOutput/rustdesk.exe "./SignOutput/${{ inputs.filename }}.exe" || echo "rustdesk"
+
+      - name: rename rustdesk.msi to filename.msi
+        continue-on-error: true
+        run: |
+          mv ./SignOutput/rustdesk.msi "./SignOutput/${{ inputs.filename }}.msi" || echo "rustdesk"
+
+      - name: send file to api server
+        shell: bash
+        run: |
+          curl -i -X POST -H "Content-Type: multipart/form-data" \
+            -H "Authorization: Bearer ${{ fromJson(inputs.extras).token }}" \
+            -F "file=@./SignOutput/${{ inputs.filename }}.exe" \
+            -F "uuid=${{ inputs.uuid }}" \
+            ${{ inputs.apiServer }}/api/save_custom_client
             
-            Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath . -Force
-            if (!(Test-Path "./rustdesk/drivers/RustDeskPrinterDriver")) { New-Item -ItemType Directory -Path "./rustdesk/drivers/RustDeskPrinterDriver" -Force }
-            mv -Force .\rustdesk_printer_driver_v4-1
+          curl -i -X POST -H "Content-Type: multipart/form-data" \
+            -H "Authorization: Bearer ${{ fromJson(inputs.extras).token }}" \
+            -F "file=@./SignOutput/${{ inputs.filename }}.msi" \
+            -F "uuid=${{ inputs.uuid }}" \
+            ${{ inputs.apiServer }}/api/save_custom_client || true
+
+      - name: Report Status
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
+
+      - name: failed
+        if: failure()
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Generation failed, try again"}'
