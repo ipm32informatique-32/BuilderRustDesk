@@ -41,14 +41,12 @@ on:
         type: string
 
 env:
-  # Utilisation de Rust 1.78 pour éviter les warnings "static_mut_refs"
   SCITER_RUST_VERSION: "1.78"
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit récent (2025) pour éviter les erreurs 404 de téléchargement
   VCPKG_COMMIT_ID: "460551b0ec06be1ba6b918448bf3b0f44add813d"
-  VERSION: "${{ fromJson(inputs.extras).version }}"
+  # VERSION: RETIRÉ D'ICI POUR ÉVITER LE CRASH AU DÉMARRAGE
   UPLOAD_ARTIFACT: 'true'
 
 jobs:
@@ -84,7 +82,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: rustdesk/rustdesk
-          ref: ${{ env.VERSION == 'master' && 'master' || format('refs/tags/{0}', env.VERSION) }}
+          # Calcul de la version directement ici pour être sûr
+          ref: ${{ fromJson(inputs.extras).version == 'master' && 'master' || format('refs/tags/{0}', fromJson(inputs.extras).version) }}
           submodules: recursive
 
       - name: Set API Status URL
@@ -137,15 +136,15 @@ jobs:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
-      # --- INSTALLATION DEPENDANCES ---
+      # --- INSTALLATION DEPENDANCES (CLEAN + NO HWCODEC LIBS) ---
       - name: Install Dependencies
         shell: pwsh
         run: |
-          # Suppression du manifeste pour forcer le mode classique
+          # 1. Suppression brutale de vcpkg.json
           Write-Host "Recherche et suppression de vcpkg.json..."
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force -Verbose
           
-          # Installation SANS libmfx (car supprimé dans cette version de vcpkg)
+          # 2. Installation SANS libmfx pour éviter l'erreur
           & "$env:VCPKG_ROOT\vcpkg" install --classic ffmpeg opus libvpx libyuv aom protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust
@@ -161,14 +160,13 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- COMPILATION (MODIFICATION CRITIQUE ICI) ---
+      # --- COMPILATION (FIXÉE : SANS HWCODEC) ---
       - name: Build rustdesk
         shell: pwsh
         run: |
-          # RETRAIT de '--hwcodec' car libmfx est manquant. Cela permet de finir la compilation.
+          # COMMANDE CORRIGÉE : Pas de --hwcodec pour éviter le plantage
           python3 .\build.py --portable --flutter --vram --skip-portable-pack
           
-          # Vérification que l'exe existe bien
           if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) {
              Write-Error "CRITICAL: rustdesk.exe was not created."
              exit 1
@@ -188,41 +186,4 @@ jobs:
             
             Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath . -Force
             if (!(Test-Path "./rustdesk/drivers/RustDeskPrinterDriver")) { New-Item -ItemType Directory -Path "./rustdesk/drivers/RustDeskPrinterDriver" -Force }
-            mv -Force .\rustdesk_printer_driver_v4-1.4\* ./rustdesk/drivers/RustDeskPrinterDriver/
-            
-            Expand-Archive printer_driver_adapter.zip -DestinationPath . -Force
-            mv -Force .\printer_driver_adapter.dll ./rustdesk/
-          } catch { Write-Host "Warning: Printer drivers failed. Continuing." }
-
-      - name: icon stuff (post-build)
-        if: ${{ inputs.iconlink != 'false' }}
-        continue-on-error: true
-        run: |
-          mv ./rustdesk/data/flutter_assets/assets/icon.svg ./rustdesk/data/flutter_assets/assets/icon.svg.bak
-          magick ./res/icon.png ./rustdesk/data/flutter_assets/assets/icon.svg
-
-      - name: logo stuff (post-build)
-        if: ${{ inputs.logolink != 'false' }}
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "${{ fromJson(inputs.logolink).url }}/get_png?filename=${{ fromJson(inputs.logolink).file }}&uuid=${{ fromJson(inputs.logolink).uuid }}" -OutFile ./rustdesk/data/flutter_assets/assets/logo.png
-
-      - name: find Runner.res
-        continue-on-error: true
-        shell: bash
-        run: |
-          runner_res=$(find . -name "Runner.res");
-          if [ "$runner_res" != "" ]; then
-            cp $runner_res ./libs/portable/Runner.res;
-          fi
-
-      - name: Download RustDeskTempTopMostWindow artifacts
-        uses: actions/download-artifact@v4
-        if: env.UPLOAD_ARTIFACT == 'true'
-        with:
-          name: topmostwindow-artifacts
-          path: "./rustdesk"
-
-      - name: Report Status
-        uses: fjogeleit/http
+            mv -Force .\rustdesk_printer_driver_v4-1
