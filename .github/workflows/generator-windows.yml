@@ -19,14 +19,6 @@ on:
       uuid:
         required: true
         type: string
-      iconlink:
-        required: false
-        default: 'false'
-        type: string
-      logolink:
-        required: false
-        default: 'false'
-        type: string
       appname:
         required: true
         default: 'rustdesk'
@@ -41,16 +33,17 @@ on:
         type: string
 
 env:
-  SCITER_RUST_VERSION: "1.78"
-  RUST_VERSION: "1.78"
+  # ON GARDE CES VERSIONS STRICTES CAR ELLES FONCTIONNENT DANS LE FICHIER D'ORIGINE
+  SCITER_RUST_VERSION: "1.75" 
+  RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Commit ID du 21 Juin 2023
-  VCPKG_COMMIT_ID: "1a17953258f4c51b22e1b65d66649f80a4913702"
-  # Chemin personnalisé
-  VCPKG_ROOT: "C:\\vcpkg_custom"
+  # Commit VCPKG de Juillet 2024 (Celui du fichier qui marche)
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
+  # Important pour le cache
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
   generate-bridge:
@@ -72,8 +65,16 @@ jobs:
     name: Build Windows
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
-    env:
-      STATUS_URL: ${{ inputs.apiServer }}/api/updategh
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - {
+              target: x86_64-pc-windows-msvc,
+              os: windows-2022,
+              arch: x86_64,
+              vcpkg-triplet: x64-windows-static,
+            }
       
     steps:
       - name: install python deps
@@ -89,63 +90,71 @@ jobs:
       - name: Install Build Tools
         run: choco install -y nasm yasm ninja imagemagick.app --no-progress
 
-      # ------------------------------------------------------------------------
-      # CORRECTION FINALE : GIT CLONE COMPLET (SANS ZIP, SANS OPTIMISATION)
-      # On clone tout le repo pour être sûr d'avoir l'historique complet.
-      # ------------------------------------------------------------------------
-      - name: Setup Custom vcpkg (Manual Git Full)
-        shell: pwsh
+      # FIX FLUTTER GPU (Issu du fichier d'origine)
+      - name: fix flutter_gpu_texture_renderer
+        shell: bash
         run: |
-          Write-Host ">>> CLONAGE COMPLET DE VCPKG..."
-          # On clone SANS --depth 1 pour avoir tout l'historique. C'est vital.
-          git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
-          
-          Write-Host ">>> DEPLACEMENT DANS LE DOSSIER..."
-          Set-Location $env:VCPKG_ROOT
-          
-          Write-Host ">>> CHECKOUT DU COMMIT 2023..."
-          # Maintenant que l'historique est complet en local, cette commande DOIT marcher.
-          git checkout $env:VCPKG_COMMIT_ID
-          
-          Write-Host ">>> COMPILATION DE VCPKG..."
-          .\bootstrap-vcpkg.bat -disableMetrics
+          sed -i -e 's|2ded7f146437a761ffe6981e2f742038f85ca68d|08a471bb8ceccdd50483c81cdfa8b81b07b14b87|' ./flutter/pubspec.lock
+          sed -i -e 's|2ded7f146437a761ffe6981e2f742038f85ca68d|08a471bb8ceccdd50483c81cdfa8b81b07b14b87|' ./flutter/pubspec.yaml
 
-      - name: Install Dependencies
-        shell: pwsh
-        run: |
-          # Nettoyage de sécurité
-          Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force
-          
-          Write-Host ">>> INSTALLATION DES LIBRAIRIES..."
-          # On appelle explicitement l'exécutable qu'on vient de compiler
-          & "$env:VCPKG_ROOT\vcpkg.exe" install ffmpeg opus libvpx libyuv aom protobuf x264 libmfx --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
-
-      - name: Install Rust and Flutter
-        uses: dtolnay/rust-toolchain@v1
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v1
         with:
-          toolchain: ${{ env.SCITER_RUST_VERSION }}
-          targets: x86_64-pc-windows-msvc
+          version: ${{ env.LLVM_VERSION }}
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - name: Install flutter
+        uses: subosito/flutter-action@v2.12.0
         with:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
+      # FIX FLUTTER ENGINE (Issu du fichier d'origine)
+      - name: Replace engine with rustdesk custom flutter engine
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          mv -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ matrix.job.os }}
+
+      # VCPKG SETUP (Exactement comme le fichier qui marche)
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      # INSTALLATION DEPENDANCES (Mode Manifeste - Le secret est ici !)
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
+        run: |
+          # On ne liste PAS les paquets. On laisse vcpkg lire le fichier vcpkg.json du repo
+          $env:VCPKG_ROOT\vcpkg install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$env:VCPKG_ROOT\installed"
+
       - name: Build rustdesk
         shell: pwsh
-        # On force le chemin vers NOTRE dossier vcpkg custom
         env:
-          VCPKG_ROOT: "C:\\vcpkg_custom"
-          RUSTFLAGS: "-C target-feature=+crt-static -L native=C:/vcpkg_custom/installed/x64-windows-static/lib"
+          VCPKG_ROOT: "C:\\vcpkg"
+          # On garde le fix du linker au cas où
+          RUSTFLAGS: "-C target-feature=+crt-static" 
         run: |
-          Write-Host ">>> LANCEMENT DU BUILD..."
-          python3 .\build.py --portable --flutter --vram --skip-portable-pack
+          # Commande de build exacte du fichier d'origine
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
-          if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) { 
-             Write-Error "CRITICAL: Echec du build."
-             exit 1 
-          }
+          if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) { exit 1 }
 
           if (Test-Path "./rustdesk") { Remove-Item -Recurse -Force "./rustdesk" }
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
@@ -178,6 +187,6 @@ jobs:
         if: success()
         uses: fjogeleit/http-request-action@v1
         with:
-          url: ${{ env.STATUS_URL }}
+          url: ${{ inputs.apiServer }}/api/updategh
           method: 'POST'
           data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
