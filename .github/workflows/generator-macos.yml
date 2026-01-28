@@ -1,5 +1,5 @@
-name: Custom macOS Client Generator (Final Fix)
-run-name: Build macOS ${{ inputs.appname }} (${{ inputs.version }})
+name: RustDesk Builder (Nuclear Fix)
+run-name: Build ${{ inputs.appname }} - ${{ inputs.version }}
 
 on:
   workflow_dispatch:
@@ -51,11 +51,9 @@ env:
   RUST_VERSION: "1.75"
   MAC_RUST_VERSION: "1.81"
   FLUTTER_VERSION: "3.24.5"
-  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
-  # Correction URL API
+  # URL de statut nettoyée
   STATUS_URL: ${{ inputs.apiServer }}/updategh
-  # Cible minimale
   MACOSX_DEPLOYMENT_TARGET: "10.15"
 
 jobs:
@@ -68,29 +66,30 @@ jobs:
     name: Build ${{ matrix.arch-name }}
     needs: [generate-bridge]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120 # Augmenté pour les files d'attente Intel
     strategy:
       fail-fast: false
       matrix:
         include:
           # --- INTEL (x86_64) ---
-          # On utilise macos-12 car macos-13 est retiré et macos-14 est ARM seulement
+          # Attention: macos-12 est lent à démarrer (file d'attente GitHub)
           - os: macos-12
             arch: x86_64
-            arch-name: "Intel (x86_64)"
+            arch-name: "Intel"
             target: x86_64-apple-darwin
             vcpkg-triplet: x64-osx
             build-args: ""
 
-          # --- APPLE SILICON (ARM64) ---
+          # --- SILICON (ARM64) ---
           - os: macos-14
             arch: aarch64
-            arch-name: "Silicon (ARM64)"
+            arch-name: "Silicon"
             target: aarch64-apple-darwin
             vcpkg-triplet: arm64-osx
             build-args: "--hwcodec --screencapturekit"
 
     env:
-      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg_custom
       VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg-triplet }}
 
     steps:
@@ -101,7 +100,7 @@ jobs:
           url: ${{ env.STATUS_URL }}
           method: 'POST'
           customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting Build ${{ matrix.arch-name }}..."}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Queued/Starting ${{ matrix.arch-name }}..."}'
 
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -110,7 +109,7 @@ jobs:
           ref: master
           submodules: recursive
 
-      - name: Setup Config Variables
+      - name: Setup Config
         run: |
           echo "appname=${{ inputs.appname }}" >> $GITHUB_ENV
           echo "filename=${{ inputs.filename }}" >> $GITHUB_ENV
@@ -121,63 +120,61 @@ jobs:
           sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
 
-      - name: Restore Bridge
+      - name: Download Bridge
         uses: actions/download-artifact@master
         with:
           name: bridge-artifact
           path: ./
 
-      - name: Install Dependencies (Brew)
+      - name: Install System Dependencies
         run: |
           brew update
           brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config git wget
           
-          # Détection automatique du chemin Brew (Intel vs ARM)
           HB_PREFIX=$(brew --prefix)
           echo "HB_PREFIX=$HB_PREFIX" >> $GITHUB_ENV
           
-          # Chemins système
           echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           
-          # Flags globaux pour C/C++ (FFmpeg)
           echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$HB_PREFIX/lib:$HB_PREFIX/opt/ffmpeg@5/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          
-          # Flags globaux pour Rust (Linker)
           echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
 
-      - name: Install & Fix VCPKG (Force Headers)
+      - name: Install Fresh VCPKG (Anti-Crash)
         run: |
-          # Initialisation forcée de VCPKG
-          if [ ! -d "vcpkg" ]; then
-             echo "VCPKG not found, cloning..."
-             git clone https://github.com/microsoft/vcpkg.git
-          fi
+          # On ignore le submodule cassé et on prend une version propre
+          echo "Cloning fresh VCPKG..."
+          git clone https://github.com/microsoft/vcpkg.git vcpkg_custom
           
-          cd vcpkg
+          cd vcpkg_custom
           ./bootstrap-vcpkg.sh
           
-          # Installation des libs requises
-          echo "Installing libraries for ${{ matrix.vcpkg-triplet }}..."
+          echo "Installing libraries..."
           ./vcpkg install libyuv libvpx aom --triplet=${{ matrix.vcpkg-triplet }}
           
-          # --- LA SOLUTION POUR L'ERREUR DE COMPILATION ---
-          # On construit les chemins absolus
-          V_INC="$GITHUB_WORKSPACE/vcpkg/installed/${{ matrix.vcpkg-triplet }}/include"
-          HB_INC="$(brew --prefix)/opt/ffmpeg@5/include"
+          # Préparation des chemins pour l'étape suivante
+          echo "V_INC=$GITHUB_WORKSPACE/vcpkg_custom/installed/${{ matrix.vcpkg-triplet }}/include" >> $GITHUB_ENV
+          echo "V_LIB=$GITHUB_WORKSPACE/vcpkg_custom/installed/${{ matrix.vcpkg-triplet }}/lib" >> $GITHUB_ENV
+
+      - name: Inject VCPKG Headers (Fix Bindgen)
+        run: |
+          # On récupère les variables définies à l'étape précédente
+          HB_INC="$HB_PREFIX/opt/ffmpeg@5/include"
           
-          # On injecte ces chemins partout pour que Bindgen/Clang les trouve
+          echo "Injecting includes: $V_INC and $HB_INC"
+          
+          # Injection massive pour forcer la détection
           echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
           echo "CPATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           echo "C_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           echo "CPLUS_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
           
-          # On met à jour CFLAGS pour inclure aussi VCPKG
-          echo "CFLAGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
+          # Mise à jour des flags de compilation pour inclure VCPKG
+          echo "CFLAGS=$CFLAGS -I$V_INC" >> $GITHUB_ENV
+          echo "CXXFLAGS=$CXXFLAGS -I$V_INC" >> $GITHUB_ENV
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
@@ -202,8 +199,9 @@ jobs:
           sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
           sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ env.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
 
-      - name: Build Application (Python)
+      - name: Build Application
         run: |
+          # VCPKG_ROOT pointe maintenant sur notre dossier custom
           python3 build.py --flutter ${{ matrix.build-args }}
 
       - name: Package DMG
@@ -216,7 +214,6 @@ jobs:
           fi
           
           DMG_NAME="${{ inputs.filename }}-${{ matrix.arch }}.dmg"
-          
           create-dmg --volname "${{ env.appname }}" "$DMG_NAME" "$APP_DEST"
           
           echo "DMG_OUTPUT=$DMG_NAME" >> $GITHUB_ENV
