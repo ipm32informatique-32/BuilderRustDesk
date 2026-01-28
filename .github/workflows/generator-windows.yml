@@ -45,9 +45,9 @@ env:
   RUST_VERSION: "1.78"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Le commit "Golden" de Juin 2023 qui contient libmfx
+  # Commit du 21 Juin 2023 : Le dernier rempart où libmfx existe.
   VCPKG_COMMIT_ID: "1a17953258f4c51b22e1b65d66649f80a4913702"
-  # Chemin personnalisé pour isoler notre installation vcpkg
+  # Dossier personnalisé pour éviter tout conflit avec les actions par défaut
   VCPKG_ROOT: "C:\\vcpkg_custom"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
@@ -89,36 +89,34 @@ jobs:
       - name: Install Build Tools
         run: choco install -y nasm yasm ninja imagemagick.app --no-progress
 
-      # -----------------------------------------------------------
-      # ETAPE CRITIQUE : INSTALLATION MANUELLE ET ROBUSTE DE VCPKG
-      # On ne passe plus par une action externe qui échoue.
-      # On clone et on compile nous-mêmes.
-      # -----------------------------------------------------------
-      - name: Setup Custom vcpkg (Manual)
+      # ------------------------------------------------------------------------
+      # LA SOLUTION MANUELLE ET ROBUSTE
+      # On ne dépend plus d'une action externe. On fait le travail nous-mêmes.
+      # ------------------------------------------------------------------------
+      - name: Setup Custom vcpkg (MANUAL FORCE)
         shell: pwsh
         run: |
-          Write-Host "Installation manuelle de vcpkg..."
-          # 1. Clonage du repo officiel
+          Write-Host ">>> CLONAGE DE VCPKG..."
+          # Clone complet pour être sûr d'avoir l'historique
           git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
           
-          # 2. Déplacement dans le dossier
+          Write-Host ">>> DEPLACEMENT DANS LE DOSSIER..."
           Set-Location $env:VCPKG_ROOT
           
-          # 3. Checkout du commit spécifique (1a17953...) qui contient libmfx
+          Write-Host ">>> RETOUR DANS LE TEMPS (Commit 2023)..."
           git checkout $env:VCPKG_COMMIT_ID
           
-          # 4. Construction de l'outil vcpkg
+          Write-Host ">>> COMPILATION DE L'OUTIL VCPKG..."
           .\bootstrap-vcpkg.bat
 
       - name: Install Dependencies
         shell: pwsh
         run: |
-          # Nettoyage préventif
+          # Nettoyage de sécurité
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force
           
-          Write-Host "Installation des librairies via vcpkg custom..."
-          # On utilise explicitement notre exécutable vcpkg
-          # libmfx sera trouvé car nous sommes sur le vieux commit
+          Write-Host ">>> INSTALLATION DES LIBRAIRIES (dont libmfx)..."
+          # On appelle explicitement l'exécutable qu'on vient de compiler
           & "$env:VCPKG_ROOT\vcpkg.exe" install ffmpeg opus libvpx libyuv aom protobuf x264 libmfx --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust and Flutter
@@ -135,16 +133,17 @@ jobs:
 
       - name: Build rustdesk
         shell: pwsh
-        # Configuration des variables pour que Rust trouve les libs dans notre dossier custom
+        # On force le chemin vers NOTRE dossier vcpkg custom
         env:
           VCPKG_ROOT: "C:\\vcpkg_custom"
           RUSTFLAGS: "-C target-feature=+crt-static -L native=C:/vcpkg_custom/installed/x64-windows-static/lib"
         run: |
-          Write-Host "Lancement du build..."
+          Write-Host ">>> LANCEMENT DU BUILD AVEC VRAM..."
           python3 .\build.py --portable --flutter --vram --skip-portable-pack
           
+          # Vérification immédiate du succès
           if (!(Test-Path "./flutter/build/windows/x64/runner/Release/rustdesk.exe")) { 
-            Write-Error "Erreur: rustdesk.exe non trouvé après compilation"
+            Write-Error "CRITICAL: rustdesk.exe introuvable après compilation."
             exit 1 
           }
 
