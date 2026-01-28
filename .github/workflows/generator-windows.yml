@@ -98,8 +98,8 @@ jobs:
         run: |
           # Suppression des fichiers manifestes pour forcer le mode classique
           Get-ChildItem -Path . -Filter "vcpkg.json" -Recurse | Remove-Item -Force
-          # On installe UNIQUEMENT les libs qui ne posent pas de problèmes de téléchargement
-          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          # CORRECTION 1 : Ajout de 'vpl' et 'intel-media-sdk'
+          & "$env:VCPKG_ROOT\vcpkg" install ffmpeg opus libvpx libyuv aom protobuf x264 vpl intel-media-sdk --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Install Rust and Flutter
         uses: dtolnay/rust-toolchain@v1
@@ -115,8 +115,12 @@ jobs:
 
       - name: Build rustdesk
         shell: pwsh
+        # CORRECTION 2 : Environment variables pour linker libmfx
+        env:
+          VCPKG_ROOT: "C:\\vcpkg"
+          RUSTFLAGS: "-C target-feature=+crt-static -L native=C:/vcpkg/installed/x64-windows-static/lib"
         run: |
-          # ON NE MET PAS --hwcodec POUR QUE LE BUILD NE PLANTE PAS
+          # Build avec le flag --vram activé
           python3 .\build.py --portable --flutter --vram --skip-portable-pack
           
           # Verification immediate
