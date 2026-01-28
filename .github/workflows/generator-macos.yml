@@ -1,5 +1,5 @@
-name: RustDesk Builder (Nuclear Fix)
-run-name: Build ${{ inputs.appname }} - ${{ inputs.version }}
+name: RustDesk Client Generator (Stable)
+run-name: Build ${{ inputs.appname }}
 
 on:
   workflow_dispatch:
@@ -46,15 +46,14 @@ permissions:
   actions: write
 
 env:
-  # Versions
   SCITER_RUST_VERSION: "1.75"
   RUST_VERSION: "1.75"
   MAC_RUST_VERSION: "1.81"
   FLUTTER_VERSION: "3.24.5"
-  MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
-  # URL de statut nettoyée
-  STATUS_URL: ${{ inputs.apiServer }}/updategh
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   MACOSX_DEPLOYMENT_TARGET: "10.15"
+  # URL simple, sans double /api
+  STATUS_URL: ${{ inputs.apiServer }}/updategh
 
 jobs:
   generate-bridge:
@@ -62,17 +61,16 @@ jobs:
     with:
       version: "1.3.1"
 
-  build-macos-matrix:
+  build-macos:
     name: Build ${{ matrix.arch-name }}
     needs: [generate-bridge]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120 # Augmenté pour les files d'attente Intel
     strategy:
       fail-fast: false
       matrix:
         include:
-          # --- INTEL (x86_64) ---
-          # Attention: macos-12 est lent à démarrer (file d'attente GitHub)
+          # --- INTEL ---
+          # Obligé d'utiliser macos-12 car le 13 est supprimé pour Intel
           - os: macos-12
             arch: x86_64
             arch-name: "Intel"
@@ -80,7 +78,7 @@ jobs:
             vcpkg-triplet: x64-osx
             build-args: ""
 
-          # --- SILICON (ARM64) ---
+          # --- SILICON ---
           - os: macos-14
             arch: aarch64
             arch-name: "Silicon"
@@ -89,8 +87,7 @@ jobs:
             build-args: "--hwcodec --screencapturekit"
 
     env:
-      VCPKG_ROOT: ${{ github.workspace }}/vcpkg_custom
-      VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg-triplet }}
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
     steps:
       - name: Report Status
@@ -100,7 +97,7 @@ jobs:
           url: ${{ env.STATUS_URL }}
           method: 'POST'
           customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ inputs.uuid }}", "status": "Queued/Starting ${{ matrix.arch-name }}..."}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting Build ${{ matrix.arch-name }}..."}'
 
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -120,61 +117,39 @@ jobs:
           sed -i -e 's|rs-ny.rustdesk.com|${{ inputs.server }}|' ./libs/hbb_common/src/config.rs
           sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ inputs.key }}|' ./libs/hbb_common/src/config.rs
 
-      - name: Download Bridge
+      - name: Restore Bridge
         uses: actions/download-artifact@master
         with:
           name: bridge-artifact
           path: ./
 
-      - name: Install System Dependencies
+      - name: Install Dependencies
         run: |
           brew update
           brew install imagemagick create-dmg nasm yasm cmake potrace llvm ffmpeg@5 libsodium pkg-config git wget
           
           HB_PREFIX=$(brew --prefix)
-          echo "HB_PREFIX=$HB_PREFIX" >> $GITHUB_ENV
           
           echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-          
           echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
           echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$HB_PREFIX/lib:$HB_PREFIX/opt/ffmpeg@5/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
-
-      - name: Install Fresh VCPKG (Anti-Crash)
-        run: |
-          # On ignore le submodule cassé et on prend une version propre
-          echo "Cloning fresh VCPKG..."
-          git clone https://github.com/microsoft/vcpkg.git vcpkg_custom
           
-          cd vcpkg_custom
+          # LE SEUL AJOUT VITAL : Chemin vers VCPKG pour que ça compile
+          V_INC="$GITHUB_WORKSPACE/vcpkg/installed/${{ matrix.vcpkg-triplet }}/include"
+          H_INC="$HB_PREFIX/opt/ffmpeg@5/include"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$H_INC -I$V_INC" >> $GITHUB_ENV
+
+      - name: Prepare VCPKG
+        run: |
+          # On utilise le vcpkg du repo (pas de clone externe compliqué)
+          cd vcpkg
           ./bootstrap-vcpkg.sh
-          
-          echo "Installing libraries..."
+          # On installe juste ce qui manque
           ./vcpkg install libyuv libvpx aom --triplet=${{ matrix.vcpkg-triplet }}
-          
-          # Préparation des chemins pour l'étape suivante
-          echo "V_INC=$GITHUB_WORKSPACE/vcpkg_custom/installed/${{ matrix.vcpkg-triplet }}/include" >> $GITHUB_ENV
-          echo "V_LIB=$GITHUB_WORKSPACE/vcpkg_custom/installed/${{ matrix.vcpkg-triplet }}/lib" >> $GITHUB_ENV
-
-      - name: Inject VCPKG Headers (Fix Bindgen)
-        run: |
-          # On récupère les variables définies à l'étape précédente
-          HB_INC="$HB_PREFIX/opt/ffmpeg@5/include"
-          
-          echo "Injecting includes: $V_INC and $HB_INC"
-          
-          # Injection massive pour forcer la détection
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
-          echo "CPATH=$V_INC:$HB_INC" >> $GITHUB_ENV
-          echo "C_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
-          echo "CPLUS_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
-          
-          # Mise à jour des flags de compilation pour inclure VCPKG
-          echo "CFLAGS=$CFLAGS -I$V_INC" >> $GITHUB_ENV
-          echo "CXXFLAGS=$CXXFLAGS -I$V_INC" >> $GITHUB_ENV
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2.12.0
@@ -201,7 +176,6 @@ jobs:
 
       - name: Build Application
         run: |
-          # VCPKG_ROOT pointe maintenant sur notre dossier custom
           python3 build.py --flutter ${{ matrix.build-args }}
 
       - name: Package DMG
