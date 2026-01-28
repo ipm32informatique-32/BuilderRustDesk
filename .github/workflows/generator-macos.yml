@@ -41,17 +41,14 @@ on:
         type: string
 
 env:
-  # Versions stables pour macOS
   SCITER_RUST_VERSION: "1.75"
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
-  # Même commit VCPKG que pour Windows (Juillet 2024), très stable
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "${{ fromJson(inputs.extras).version }}"
   UPLOAD_ARTIFACT: 'true'
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-  # URL de statut
   STATUS_URL: ${{ inputs.apiServer }}/api/updategh
 
 jobs:
@@ -60,31 +57,20 @@ jobs:
     with:
       version: ${{ fromJson(inputs.extras).version }}
 
-  # PAS DE JOB RustDeskTempTopMostWindow ICI (C'est pour Windows uniquement)
-
   build-for-macos:
     name: Build macOS
     needs: [generate-bridge]
-    # Utilisation de la matrice pour choisir le bon OS selon l'architecture cible
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
-          # Build Intel (x64) sur macOS 13 (Ventura)
           - {
               target: x86_64-apple-darwin,
               os: macos-13,
               arch: x86_64,
               vcpkg-triplet: x64-osx,
             }
-          # Build Apple Silicon (M1/M2) sur macOS 14 (Sonoma)
-          # - {
-          #     target: aarch64-apple-darwin,
-          #     os: macos-14,
-          #     arch: aarch64,
-          #     vcpkg-triplet: arm64-osx,
-          #   }
 
     steps:
       - name: Report Status 0%
@@ -112,18 +98,11 @@ jobs:
           name: bridge-artifact
           path: ./
 
-      # --- INSTALLATION DES OUTILS MAC (Brew au lieu de Choco) ---
       - name: Install Build Tools (Brew)
         run: |
           brew update
           brew install imagemagick create-dmg nasm yasm cmake ninja wget
-          # On s'assure que clang est dispo
           xcode-select --install || true
-
-      - name: fix flutter_gpu_texture_renderer
-        run: |
-          sed -i '' -e 's|2ded7f146437a761ffe6981e2f742038f85ca68d|08a471bb8ceccdd50483c81cdfa8b81b07b14b87|' ./flutter/pubspec.lock
-          sed -i '' -e 's|2ded7f146437a761ffe6981e2f742038f85ca68d|08a471bb8ceccdd50483c81cdfa8b81b07b14b87|' ./flutter/pubspec.yaml
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v1
@@ -136,15 +115,6 @@ jobs:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      - name: Replace engine with rustdesk custom flutter engine
-        run: |
-          flutter doctor -v
-          flutter precache --macos
-          # Téléchargement moteur Mac (Note: URL différente de Windows)
-          # Note: RustDesk utilise souvent le moteur par défaut sur Mac ou un build spécifique.
-          # Si le build officiel n'a pas d'URL spécifique Mac ici, on saute l'écrasement ou on adapte l'URL.
-          # Pour l'instant, on laisse flutter standard sauf si une URL Mac existe.
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -156,5 +126,90 @@ jobs:
         with:
           prefix-key: ${{ matrix.job.os }}
 
-      # --- GESTION DES ICONES MAC ---
-      - name: Process
+      # --- GESTION DES CONFIGURATIONS PERSONNALISÉES ---
+      - name: Download and Apply Custom Config
+        run: |
+          # 1. Ecriture de la config custom
+          echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
+          
+          # 2. Gestion de l'icône personnalisée (Spécifique macOS)
+          if [ "${{ inputs.iconlink }}" != "false" ]; then
+            echo "Downloading Custom Icon..."
+            wget -O custom_icon.png "${{ inputs.iconlink }}"
+            
+            # Création dossier icônes
+            mkdir rustdesk.iconset
+            
+            # Redimensionnement pour créer les tailles standards macOS
+            sips -z 16 16     custom_icon.png --out rustdesk.iconset/icon_16x16.png
+            sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_16x16@2x.png
+            sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_32x32.png
+            sips -z 64 64     custom_icon.png --out rustdesk.iconset/icon_32x32@2x.png
+            sips -z 128 128   custom_icon.png --out rustdesk.iconset/icon_128x128.png
+            sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_128x128@2x.png
+            sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_256x256.png
+            sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_256x256@2x.png
+            sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_512x512.png
+            
+            # Conversion en .icns
+            iconutil -c icns rustdesk.iconset
+            
+            # Remplacement de l'icône par défaut dans le code source Flutter (avant build)
+            cp rustdesk.icns flutter/macos/Runner/Assets.xcassets/AppIcon.appiconset/
+            # Pour la version Sciter (si utilisée)
+            cp rustdesk.icns res/mac.icns || true
+          fi
+
+      - name: Build RustDesk (Release)
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
+        run: |
+          # Installation dépendances VCPKG si nécessaire (souvent géré par build.py)
+          python3 build.py --hwcodec --flutter --release
+
+      - name: Package DMG
+        run: |
+          # Le build génère une .app dans flutter/build/macos/Build/Products/Release/
+          APP_PATH="flutter/build/macos/Build/Products/Release/rustdesk.app"
+          
+          # Renommage si appname est différent
+          if [ "${{ inputs.appname }}" != "rustdesk" ]; then
+            mv "$APP_PATH" "flutter/build/macos/Build/Products/Release/${{ inputs.appname }}.app"
+            APP_PATH="flutter/build/macos/Build/Products/Release/${{ inputs.appname }}.app"
+          fi
+          
+          # Création du DMG
+          create-dmg \
+            --volname "${{ inputs.appname }}" \
+            --volicon "rustdesk.icns" \
+            --window-pos 200 120 \
+            --window-size 800 400 \
+            --icon-size 100 \
+            --icon "${{ inputs.appname }}.app" 200 190 \
+            --hide-extension "${{ inputs.appname }}.app" \
+            --app-drop-link 600 185 \
+            "${{ inputs.filename }}.dmg" \
+            "$APP_PATH"
+
+      - name: Report Status 100% (Uploading)
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Uploading macOS Client..."}'
+
+      - name: Upload to Server
+        run: |
+          curl -X POST -F "file=@${{ inputs.filename }}.dmg" -F "uuid=${{ inputs.uuid }}" ${{ inputs.apiServer }}/api/save_custom_client
+
+      - name: Report Status Success
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
