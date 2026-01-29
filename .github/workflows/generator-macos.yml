@@ -1,183 +1,215 @@
-import io
-import os
-import json
-import uuid
-import base64
-import pathlib
-import requests
-from django.http import HttpResponse, HttpResponseRedirect, FileResponse
-from django.shortcuts import render
-from django.contrib.auth.decorators import login_required
-from django.conf import settings as _settings
-from django.views.decorators.csrf import csrf_exempt
+name: Custom macOS Client Generator
+run-name: Custom macOS Client Generator
+on: 
+  workflow_dispatch:
+    inputs:
+      server:
+        required: true
+        type: string
+      key:
+        required: true
+        type: string
+      apiServer:
+        required: true
+        type: string
+      custom:
+        required: true
+        default: ''
+        type: string
+      uuid:
+        required: true
+        type: string
+      iconlink:
+        required: false
+        default: 'false'
+        type: string
+      logolink:
+        required: false
+        default: 'false'
+        type: string
+      appname:
+        required: true
+        default: 'rustdesk'
+        type: string
+      filename:
+        required: true
+        default: 'rustdesk'
+        type: string
+      extras:
+        required: true
+        default: '{}'
+        type: string
 
-# Importation du modèle
-from .models import GithubRun
+env:
+  SCITER_RUST_VERSION: "1.75"
+  RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VERSION: "${{ fromJson(inputs.extras).version }}"
+  UPLOAD_ARTIFACT: 'true'
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  STATUS_URL: ${{ inputs.apiServer }}/api/updategh
 
-@csrf_exempt 
-@login_required(login_url='/api/user_action?action=login')
-def generator_view(request):
-    from .forms import GenerateForm
-    if request.method == 'POST':
-        form = GenerateForm(request.POST, request.FILES)
-        if form.is_valid():
-            # 1. Extraction des données
-            platform = form.cleaned_data['platform']
-            version = form.cleaned_data['version']
-            server = form.cleaned_data['serverIP'] or 'rs-ny.rustdesk.com'
-            key = form.cleaned_data['key'] or 'OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw='
-            
-            # --- FIX POUR GITHUB & NGROK ---
-            if "ngrok" in request.get_host():
-                full_url = f"https://{request.get_host()}"
-            else:
-                full_url = getattr(_settings, 'NGROK_URL', f"http://{request.get_host()}")
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+    with:
+      version: ${{ fromJson(inputs.extras).version }}
 
-            apiServer = form.cleaned_data['apiServer'] or full_url
-            appname = form.cleaned_data['appname'] or 'rustdesk'
-            filename = form.cleaned_data['exename'] or 'rustdesk'
-            
-            myuuid = str(uuid.uuid4())
-            
-            # --- Sauvegarde Icône/Logo ---
-            iconlink = "false"
-            if request.FILES.get('iconfile'):
-                iconlink = save_png_file(request.FILES.get('iconfile'), myuuid, full_url, "icon.png")
-
-            # --- Configuration JSON ---
-            custom_obj = {
-                'override-settings': {'host': server, 'key': key, 'api-server': apiServer},
-                'default-settings': {}
-            }
-            custom_json = json.dumps(custom_obj)
-
-            # --- Extras pour le YAML ---
-            extras_data = {
-                'version': version,
-                'rdgen': 'false',
-                'token': _settings.GHBEARER,
-                'compname': 'MyCompany',
-                'urlLink': 'https://rustdesk.com',
-                'downloadLink': 'https://rustdesk.com/download'
-            }
-            extras_json = json.dumps(extras_data)
-
-            # --- Envoi GitHub ---
-            # CORRECTION ICI : Ajout de la gestion macOS
-            workflow = "generator-windows.yml"
-            if platform == 'linux': 
-                workflow = "generator-linux.yml"
-            elif platform == 'android': 
-                workflow = "generator-android.yml"
-            elif platform in ['mac', 'macos', 'darwin']: # Condition ajoutée pour Mac
-                workflow = "generator-macos.yml"
-
-            url = f"https://api.github.com/repos/{_settings.GHUSER}/{_settings.REPONAME}/actions/workflows/{workflow}/dispatches"
-            
-            data = {
-                "ref": "master", 
-                "inputs": {
-                    "server": server, "key": key, "apiServer": apiServer,
-                    "custom": custom_json, "uuid": myuuid, "appname": appname,
-                    "filename": filename, "extras": extras_json,
-                    "iconlink": iconlink, "logolink": "false"
-                }
-            }
-            
-            headers = {
-                'Accept': 'application/vnd.github+json',
-                'Authorization': f'Bearer {_settings.GHBEARER}',
-                'X-GitHub-Api-Version': '2022-11-28'
+  build-for-macos:
+    name: Build macOS
+    needs: [generate-bridge]
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - {
+              target: x86_64-apple-darwin,
+              os: macos-13,
+              arch: x86_64,
+              vcpkg-triplet: x64-osx,
             }
 
-            GithubRun.objects.create(uuid=myuuid, status="Starting...", name=filename, platform=platform)
+    steps:
+      - name: Report Status 0%
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Starting macOS Build..."}'
+
+      - name: install python deps
+        run: pip3 install requests pyzipper
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.VERSION == 'master' && 'master' || format('refs/tags/{0}', env.VERSION) }}
+          submodules: recursive
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install Build Tools (Brew)
+        run: |
+          brew update
+          brew install imagemagick create-dmg nasm yasm cmake ninja wget
+          xcode-select --install || true
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install flutter
+        uses: subosito/flutter-action@v2.12.0
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ matrix.job.os }}
+
+      # --- GESTION DES CONFIGURATIONS PERSONNALISÉES ---
+      - name: Download and Apply Custom Config
+        run: |
+          # 1. Ecriture de la config custom
+          echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
+          
+          # 2. Gestion de l'icône personnalisée (Spécifique macOS)
+          if [ "${{ inputs.iconlink }}" != "false" ]; then
+            echo "Downloading Custom Icon..."
+            wget -O custom_icon.png "${{ inputs.iconlink }}"
             
-            try:
-                res = requests.post(url, json=data, headers=headers)
-                print(f"STATUS GITHUB: {res.status_code}")
-            except Exception as e:
-                print(f"ERREUR RÉSEAU: {e}")
+            # Création dossier icônes
+            mkdir rustdesk.iconset
             
-            return HttpResponseRedirect('/api/clients')
-    else:
-        form = GenerateForm()
+            # Redimensionnement pour créer les tailles standards macOS
+            sips -z 16 16     custom_icon.png --out rustdesk.iconset/icon_16x16.png
+            sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_16x16@2x.png
+            sips -z 32 32     custom_icon.png --out rustdesk.iconset/icon_32x32.png
+            sips -z 64 64     custom_icon.png --out rustdesk.iconset/icon_32x32@2x.png
+            sips -z 128 128   custom_icon.png --out rustdesk.iconset/icon_128x128.png
+            sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_128x128@2x.png
+            sips -z 256 256   custom_icon.png --out rustdesk.iconset/icon_256x256.png
+            sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_256x256@2x.png
+            sips -z 512 512   custom_icon.png --out rustdesk.iconset/icon_512x512.png
+            
+            # Conversion en .icns
+            iconutil -c icns rustdesk.iconset
+            
+            # Remplacement de l'icône par défaut dans le code source Flutter (avant build)
+            cp rustdesk.icns flutter/macos/Runner/Assets.xcassets/AppIcon.appiconset/
+            # Pour la version Sciter (si utilisée)
+            cp rustdesk.icns res/mac.icns || true
+          fi
 
-    ua = request.META.get('HTTP_USER_AGENT', '')
-    is_mobile = any(x in ua for x in ['Mobile', 'Android', 'iPhone'])
-    phone_or_desktop = 'base_phone.html' if is_mobile else 'base.html'
+      - name: Build RustDesk (Release)
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
+        run: |
+          # Installation dépendances VCPKG si nécessaire (souvent géré par build.py)
+          python3 build.py --hwcodec --flutter --release
 
-    return render(request, 'generator.html', {
-        'form': form,
-        'phone_or_desktop': phone_or_desktop
-    })
+      - name: Package DMG
+        run: |
+          # Le build génère une .app dans flutter/build/macos/Build/Products/Release/
+          APP_PATH="flutter/build/macos/Build/Products/Release/rustdesk.app"
+          
+          # Renommage si appname est différent
+          if [ "${{ inputs.appname }}" != "rustdesk" ]; then
+            mv "$APP_PATH" "flutter/build/macos/Build/Products/Release/${{ inputs.appname }}.app"
+            APP_PATH="flutter/build/macos/Build/Products/Release/${{ inputs.appname }}.app"
+          fi
+          
+          # Création du DMG
+          create-dmg \
+            --volname "${{ inputs.appname }}" \
+            --volicon "rustdesk.icns" \
+            --window-pos 200 120 \
+            --window-size 800 400 \
+            --icon-size 100 \
+            --icon "${{ inputs.appname }}.app" 200 190 \
+            --hide-extension "${{ inputs.appname }}.app" \
+            --app-drop-link 600 185 \
+            "${{ inputs.filename }}.dmg" \
+            "$APP_PATH"
 
-# --- FONCTIONS SUPPORTS ---
+      - name: Report Status 100% (Uploading)
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Uploading macOS Client..."}'
 
-def get_png(request):
-    filename = request.GET.get('filename')
-    uuid_val = request.GET.get('uuid')
-    file_path = os.path.join('png', uuid_val, filename)
-    if os.path.exists(file_path):
-        return FileResponse(open(file_path, 'rb'), content_type='image/png')
-    return HttpResponse("Not Found", status=404)
+      - name: Upload to Server
+        run: |
+          curl -X POST -F "file=@${{ inputs.filename }}.dmg" -F "uuid=${{ inputs.uuid }}" ${{ inputs.apiServer }}/api/save_custom_client
 
-@csrf_exempt
-def save_custom_client(request):
-    if request.method == 'POST' and 'file' in request.FILES:
-        file = request.FILES['file']
-        my_uuid = request.POST.get('uuid') or "default"
-        path = pathlib.Path(f"exe/{my_uuid}")
-        path.mkdir(parents=True, exist_ok=True)
-        with open(path / file.name, 'wb+') as dest:
-            for chunk in file.chunks():
-                dest.write(chunk)
-        return HttpResponse("Fichier sauvegardé")
-    return HttpResponse("Erreur", status=400)
-
-@csrf_exempt
-def update_github_run(request):
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body)
-            GithubRun.objects.filter(uuid=data.get('uuid')).update(status=data.get('status'))
-        except:
-            pass
-    return HttpResponse('OK')
-
-@csrf_exempt
-def create_github_run(request):
-    return update_github_run(request)
-
-@login_required(login_url='/api/user_action?action=login')
-def check_for_file(request):
-    uuid = request.GET.get('uuid')
-    gh_run = GithubRun.objects.filter(uuid=uuid).first()
-    return render(request, 'waiting.html', {
-        'status': gh_run.status if gh_run else "Unknown",
-        'uuid': uuid
-    })
-
-@login_required(login_url='/api/user_action?action=login')
-def download_client(request):
-    filename = request.GET.get('filename')
-    uuid = request.GET.get('uuid')
-    file_path = os.path.join('exe', uuid, filename)
-    if os.path.exists(file_path):
-        with open(file_path, 'rb') as f:
-            return HttpResponse(f.read(), content_type='application/octet-stream')
-    return HttpResponse("File not found", status=404)
-
-@login_required(login_url='/api/user_action?action=login')
-def delete_pending(request):
-    run_id = request.GET.get('id')
-    if run_id:
-        GithubRun.objects.filter(id=run_id).delete()
-    return HttpResponseRedirect('/api/clients')
-
-def save_png_file(file, uuid_val, domain, name):
-    path = pathlib.Path(f"png/{uuid_val}")
-    path.mkdir(parents=True, exist_ok=True)
-    with open(path / name, 'wb+') as dest:
-        for chunk in file.chunks():
-            dest.write(chunk)
-    return json.dumps({'url': f"{domain}/api/get_png", 'uuid': uuid_val, 'file': name})
+      - name: Report Status Success
+        uses: fjogeleit/http-request-action@v1
+        continue-on-error: true
+        with:
+          url: ${{ env.STATUS_URL }}
+          method: 'POST'
+          customHeaders: '{"Content-Type": "application/json"}'
+          data: '{"uuid": "${{ inputs.uuid }}", "status": "Success"}'
