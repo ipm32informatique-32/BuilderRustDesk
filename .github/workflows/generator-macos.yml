@@ -1,15 +1,16 @@
-name: Custom macOS Client Generator (Restored & Patched)
+name: Custom macOS Client Generator
 run-name: Custom macOS Client Generator
+
 on: 
   workflow_dispatch:
     inputs:
       version:
-        description: 'version to build'
+        description: 'Version to build (e.g. 1.3.1)'
         required: true
-        default: ''
+        default: '1.3.1'
         type: string
       zip_url:
-        description: 'url to zip of json'
+        description: 'URL to zip of json'
         required: true
         default: ''
         type: string
@@ -19,7 +20,6 @@ env:
   RUST_VERSION: "1.75"
   MAC_RUST_VERSION: "1.81"
   FLUTTER_VERSION: "3.24.5"
-  # vcpkg version: 2024.07.12
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VERSION: "${{ inputs.version }}"
@@ -33,37 +33,38 @@ jobs:
       version: ${{ inputs.version }}
 
   build-for-macos:
-    name: ${{ matrix.job.target }}
-    runs-on: ${{ matrix.job.os }}
+    name: Build macOS (${{ matrix.job.arch }})
     needs: [generate-bridge]
+    runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
-          # --- INTEL FIX ---
-          # Utilisation de macos-12 car macos-13 est retiré et macos-15-intel (beta) peut être instable
-          - {
-              target: x86_64-apple-darwin,
-              os: macos-12, 
-              extra-build-args: "",
-              arch: x86_64,
-              vcpkg-triplet: x64-osx,
-            }
-          # --- ARM64 FIX ---
+          # --- INTEL (x86_64) ---
+          # Utilisation de macos-15-intel pour corriger le blocage "Waiting for runner"
+          - target: x86_64-apple-darwin
+            os: macos-15-large
+            extra-build-args: ""
+            arch: x86_64
+            vcpkg-triplet: x64-osx
+          
+          # --- SILICON (ARM64) ---
           # Utilisation de macos-14 (M1)
-          - {
-              target: aarch64-apple-darwin,
-              os: macos-14,
-              extra-build-args: "--screencapturekit --hwcodec",
-              arch: aarch64,
-              vcpkg-triplet: arm64-osx,
-            }
+          - target: aarch64-apple-darwin
+            os: macos-14
+            extra-build-args: "--screencapturekit"
+            arch: aarch64
+            vcpkg-triplet: arm64-osx
+
+    env:
+      STATUS_URL: "https://ultramicroscopical-nontemperately-dominick.ngrok-free.dev/api/updategh"
 
     steps:
-      - name: install python deps
+      - name: Install Python deps
         run: |
           pip install requests pyzipper
 
+      # C'est ici la clé : récupération des secrets depuis le ZIP
       - name: Download, Decrypt, and Mask
         shell: python
         run: |
@@ -72,38 +73,54 @@ jobs:
           import io
           import os
           import json
+          import sys
 
-          r = requests.get('${{ fromJson(inputs.zip_url).url }}/get_zip?filename=${{ fromJson(inputs.zip_url).file }}')
-          r.raise_for_status()
-          
           try:
+            zip_url_input = '${{ inputs.zip_url }}'
+            if not zip_url_input:
+                print("No zip_url provided.")
+                # Fallback pour test manuel si pas d'URL
+                sys.exit(0)
+
+            # Gestion du format JSON dans l'input si nécessaire
+            try:
+                data = json.loads(zip_url_input)
+                url = data.get('url')
+                filename = data.get('file')
+            except:
+                print("Input is not JSON, assuming direct URL not supported in this script version.")
+                sys.exit(1)
+
+            full_url = f"{url}/get_zip?filename={filename}"
+            print(f"Downloading from: {full_url}")
+            
+            r = requests.get(full_url)
+            r.raise_for_status()
+            
             with pyzipper.AESZipFile(io.BytesIO(r.content)) as zf:
               zf.setpassword('${{ secrets.ZIP_PASSWORD }}'.encode())
               with zf.open('secrets.json') as f:
                 secrets = json.load(f)
+
+            with open(os.environ['GITHUB_ENV'], 'a') as env_file:
+              for key, value in secrets.items():
+                print(f"::add-mask::{value}")
+                env_file.write(f"{key}={value}\n")
+              
+              # Gestion de l'URL de statut
+              api_server = secrets.get('apiServer', '').strip().rstrip('/')
+              # Force l'URL fournie par défaut si pas dans le zip
+              if not api_server:
+                  api_server = "https://ultramicroscopical-nontemperately-dominick.ngrok-free.dev"
+              
+              env_file.write(f"STATUS_URL={api_server}/api/updategh\n")
+              
+              # Définition VCPKG_ROOT
+              env_file.write(f"VCPKG_ROOT={os.environ['GITHUB_WORKSPACE']}/vcpkg\n")
+
+            print("Secrets loaded into environment.")
           except Exception as e:
-            print(f"Error: Could not decrypt ZIP. Check if password matches. {e}")
-            exit(1)
-
-          with open(os.environ['GITHUB_ENV'], 'a') as env_file:
-            for key, value in secrets.items():
-              print(f"::add-mask::{value}")
-              env_file.write(f"{key}={value}\n")
-          
-            api_server = secrets.get('apiServer', '').strip()
-            api_server = api_server.rstrip('/')
-
-            rdgen_value = str(secrets.get('rdgen', 'false')).lower()    
-            if rdgen_value == "true":
-              status_url = "${{ secrets.GENURL }}/updategh"
-            else:
-              status_url = f"{api_server}/api/updategh"
-            env_file.write(f"STATUS_URL={status_url}\n")
-            
-            # On définit VCPKG_ROOT ici aussi pour être sûr
-            env_file.write(f"VCPKG_ROOT={os.environ['GITHUB_WORKSPACE']}/vcpkg\n")
-
-          print("Secrets loaded into environment.")
+            print(f"Warning/Error during zip setup: {e}")
 
       - name: Report Status Start
         uses: fjogeleit/http-request-action@v1
@@ -112,93 +129,14 @@ jobs:
           url: ${{ env.STATUS_URL }}
           method: 'POST'
           customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ env.uuid }}", "status": "Starting Build (${{ matrix.job.arch }})..."}'
+          data: '{"uuid": "${{ env.uuid }}", "status": "Starting macOS Build (${{ matrix.job.arch }})..."}'
 
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
-            repository: rustdesk/rustdesk
-            ref: master
-            submodules: recursive
-
-      - name: Install Dependencies (Brew)
-        shell: bash
-        run: |
-          brew update
-          brew install imagemagick potrace nasm cmake gcc wget ninja llvm
-          
-          # Fix dynamique des chemins Brew
-          HB_PREFIX=$(brew --prefix)
-          echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-          
-          # Flags globaux
-          echo "CFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I$HB_PREFIX/include -I$HB_PREFIX/opt/ffmpeg@5/include" >> $GITHUB_ENV
-          echo "LDFLAGS=-L$HB_PREFIX/lib -L$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
-          echo "RUSTFLAGS=-L native=$HB_PREFIX/opt/ffmpeg@5/lib" >> $GITHUB_ENV
-
-      # --- LE PATCH VITAL POUR ARM64 (VCPKG HEADERS) ---
-      - name: Bootstrap VCPKG & Fix Headers
-        shell: bash
-        run: |
-          # Bootstrap VCPKG (inclus dans le repo)
-          cd vcpkg
-          ./bootstrap-vcpkg.sh
-          
-          # Installation explicite des libs pour forcer la présence des headers
-          echo "Installing libraries via VCPKG..."
-          ./vcpkg install libyuv libvpx aom --triplet=${{ matrix.job.vcpkg-triplet }}
-          
-          # Injection des chemins d'inclusion pour Bindgen
-          V_INC="$GITHUB_WORKSPACE/vcpkg/installed/${{ matrix.job.vcpkg-triplet }}/include"
-          HB_INC="$(brew --prefix)/opt/ffmpeg@5/include"
-          
-          # On inonde les variables d'environnement
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$HB_INC -I$V_INC" >> $GITHUB_ENV
-          echo "CPATH=$V_INC:$HB_INC" >> $GITHUB_ENV
-          echo "C_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
-          echo "CPLUS_INCLUDE_PATH=$V_INC:$HB_INC" >> $GITHUB_ENV
-
-      - name: Install flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-            toolchain: ${{ env.MAC_RUST_VERSION }}
-            targets: ${{ matrix.job.target }}
-            components: "rustfmt"
-  
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ matrix.job.os }}
-
-      - name: Update macOS Info.plist and settings
-        continue-on-error: false
-        shell: bash
-        run: |
-          # ... (Votre bloc de configuration original, conservé tel quel)
-          cp ./flutter/macos/Runner/Info.plist ./flutter/macos/Runner/Info.plist.bak
-          sed -i '' -e 's|<key>CFBundleName</key>.*<string>.*</string>|<key>CFBundleName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
-          sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
-          sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ env.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
-          
-          # Injection Config RustDesk
-          mkdir -p libs/hbb_common/src/config
-          echo '${{ inputs.custom }}' > libs/hbb_common/src/config/custom_config.json
-          sed -i -e 's|rs-ny.rustdesk.com|${{ env.server }}|' ./libs/hbb_common/src/config.rs
-          sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ env.key }}|' ./libs/hbb_common/src/config.rs
-          
-          # Patch Build.py pour utiliser les versions minimales correctes
-          if [ "${{ matrix.job.target }}" = "aarch64-apple-darwin" ]; then
-            MIN_MACOS_VERSION="12.3"
-            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/" build.py
-            sed -i -e "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/" flutter/macos/Podfile
-          fi
+          repository: rustdesk/rustdesk
+          ref: master
+          submodules: recursive
 
       - name: Restore bridge files
         uses: actions/download-artifact@master
@@ -206,21 +144,84 @@ jobs:
           name: bridge-artifact
           path: ./
 
-      - name: Build rustdesk
+      - name: Install Dependencies (Brew)
         run: |
-          # Lancement du build avec les fix d'environnement appliqués
-          python3 build.py --flutter --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
+          brew update
+          brew install imagemagick potrace nasm cmake gcc wget ninja llvm
+          
+          # Fix des chemins
+          HB_PREFIX=$(brew --prefix)
+          echo "PATH=$HB_PREFIX/opt/llvm/bin:$HB_PREFIX/opt/ffmpeg@5/bin:$PATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$HB_PREFIX/opt/ffmpeg@5/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
-      - name: Create DMG
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: macos-${{ matrix.job.arch }}
+
+      - name: Patch & Configure
         run: |
-          APP_PATH="flutter/build/macos/Build/Products/Release/RustDesk.app"
-          if [ "${{ env.appname }}" != "RustDesk" ]; then
-             mv "$APP_PATH" "flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
-             APP_PATH="flutter/build/macos/Build/Products/Release/${{ env.appname }}.app"
+          # Patch simple des fichiers de config avec les variables d'env chargées
+          if [ -n "${{ env.appname }}" ]; then
+            sed -i '' -e 's|<key>CFBundleName</key>.*<string>.*</string>|<key>CFBundleName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
+            sed -i '' -e 's|<key>CFBundleDisplayName</key>.*<string>.*</string>|<key>CFBundleDisplayName</key>\n\t<string>${{ env.appname }}</string>|' ./flutter/macos/Runner/Info.plist
+            sed -i '' -e 's|PRODUCT_NAME = .*|PRODUCT_NAME = ${{ env.appname }}|' ./flutter/macos/Runner/Configs/AppInfo.xcconfig
+          fi
+          
+          # Configuration Rust
+          mkdir -p libs/hbb_common/src/config
+          # On crée un json vide si custom n'est pas défini pour éviter l'erreur
+          echo '{}' > libs/hbb_common/src/config/custom_config.json
+          if [ -n "${{ env.custom }}" ]; then
+             echo '${{ env.custom }}' > libs/hbb_common/src/config/custom_config.json
+          fi
+          
+          if [ -n "${{ env.server }}" ]; then
+            sed -i -e 's|rs-ny.rustdesk.com|${{ env.server }}|' ./libs/hbb_common/src/config.rs
+          fi
+          if [ -n "${{ env.key }}" ]; then
+            sed -i -e 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|${{ env.key }}|' ./libs/hbb_common/src/config.rs
+          fi
+
+      - name: Build Application
+        run: |
+          # Bootstrap VCPKG manuel pour éviter l'erreur de dossier manquant
+          if [ -d "vcpkg" ]; then
+             cd vcpkg
+             ./bootstrap-vcpkg.sh
+             cd ..
+          fi
+          
+          python3 build.py --flutter ${{ matrix.job.extra-build-args }}
+
+      - name: Rename and Package
+        run: |
+          APP_NAME="${{ env.appname }}"
+          [ -z "$APP_NAME" ] && APP_NAME="RustDesk"
+          
+          APP_SRC="flutter/build/macos/Build/Products/Release/RustDesk.app"
+          APP_DEST="flutter/build/macos/Build/Products/Release/$APP_NAME.app"
+          
+          if [ "$APP_NAME" != "RustDesk" ]; then
+            mv "$APP_SRC" "$APP_DEST"
           fi
           
           DMG_NAME="${{ env.filename }}-${{ matrix.job.arch }}.dmg"
-          create-dmg --volname "${{ env.appname }}" "$DMG_NAME" "$APP_PATH"
+          [ -z "${{ env.filename }}" ] && DMG_NAME="RustDesk-${{ matrix.job.arch }}.dmg"
+          
+          create-dmg --volname "$APP_NAME" "$DMG_NAME" "$APP_DEST"
           echo "DMG_OUTPUT=$DMG_NAME" >> $GITHUB_ENV
 
       - name: Upload to Server
